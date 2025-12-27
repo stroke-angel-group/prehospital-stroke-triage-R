@@ -1,0 +1,1111 @@
+---
+title: "Evaluation"
+editor: visual
+---
+
+### Load Packages
+
+```{r}
+
+# for rendering pdf files
+library(showtext) 
+
+# Project-relative paths & file management
+library(here)
+
+library(tidyverse)
+library(tidymodels)
+
+# Evaluation
+library(yardstick) 
+library(PRROC) # calculate both the ROCAUC and PRAUC
+library(pROC)  # plot and compare the (Ensemble) ROC Curves
+
+```
+
+### Load Data
+
+```{r}
+
+stroke_triage_data <- read_csv(here("Code",
+                                    "Data Preprocessing",
+                                    "data_manipulation_6_SFS",
+                                    "data_manipulation_6_SFS.csv"))
+
+```
+
+### Load Models
+
+```{r}
+
+# Load each model
+
+final_OneR_model <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_OneR_model.rds"))
+
+final_knn_model  <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_knn_model.rds"))
+
+final_cart_model <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_cart_model.rds"))
+
+final_xgb_model  <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_xgb_model.rds"))
+
+final_rf_model   <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_rf_model.rds"))
+
+final_nn_model   <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_nn_model.rds"))
+
+```
+
+# Preprocessing
+
+## Train-Test Data Split
+
+```{r}
+
+# Set seed for reproducible and comparable Train-Test split
+set.seed(456)
+
+# Split the dataset into training and testing sets
+stroke_triage_data_split <- initial_split(stroke_triage_data,
+                                         prop = 0.8,
+                                         strata = EVT) 
+
+# create separate dataframes
+train_data <- stroke_triage_data_split %>% training()
+test_data <- stroke_triage_data_split %>% testing()
+
+stroke_triage_data_split
+
+```
+
+## Imputation
+
+Set Data Types for Imputation
+
+```{r}
+
+# Ensure correct data types for train data
+train_data <- train_data %>%
+  mutate(vigilance_4ISS  = factor(vigilance_4ISS,
+                                  levels = c(0, 1, 2),
+                                  ordered = TRUE),
+gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                  levels = c(0, 1, 2),
+                                  ordered = TRUE),
+        hemiparesis_4ISS = factor(hemiparesis_4ISS,
+                                  levels = c(0, 1, 2),
+                                  ordered = TRUE),
+
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    # Ensure outcome variable is a factor
+    EVT = factor(EVT, levels = c("0", "1"))  
+  )
+
+# Apply the same transformations to test data
+test_data <- test_data %>%
+  mutate(
+    vigilance_4ISS = factor(vigilance_4ISS,
+                            levels = c(0, 1, 2),
+                            ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = TRUE),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS,
+                              levels = c(0, 1, 2),
+                              ordered = TRUE),
+
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    EVT = factor(EVT, levels = c("0", "1"))
+  )
+
+```
+
+**Apply Bagged Tree Imputation**
+
+We analyzed the `data_manipulation_5_imputation.qmd` file and found that `step_impute_bag()` provides the most suitable imputation method for our dataset.
+
+Each feature with missing values is treated as the **target (label)**, while all other available features act as **predictors**. Multiple decision trees (like in Random Forest, but each tree uses all predictors) are trained on different random subsets of the data. The missing values are then predicted using these models, and this process is repeated separately for each variable with missing data.
+
+```{r}
+
+# Define the recipe for imputation using bagged trees
+imputation_recipe <- recipe(EVT ~ ., data = train_data) %>%
+  step_impute_bag(all_predictors())  
+
+# Train the recipe using only the training data
+trained_imputation_recipe <- imputation_recipe %>%
+  prep(training = train_data, retain = TRUE)  
+
+# Apply the trained recipe separately to training and test data
+train_data <- bake(trained_imputation_recipe, new_data = train_data)  
+test_data  <- bake(trained_imputation_recipe, new_data = test_data)  
+
+```
+
+Convert all Factors to Numeric
+
+```{r}
+#| warning: false
+
+train_data <- train_data %>%
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))), # Convert factors to numeric
+         EVT = factor(EVT, levels = c("1", "0")))                 # The EVT label as a factor
+
+test_data <- test_data %>%
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))), # Convert factors to numeric
+         EVT = factor(EVT, levels = c("1", "0")))                 # The EVT label as a factor
+
+```
+
+## Select Features Manually
+
+**Get Current Features**
+
+```{r}
+
+colnames(stroke_triage_data)
+
+```
+
+**Select 14 Features from Feature Selection**
+
+```{r}
+
+# for train data
+train_data <- train_data %>% 
+  select(gender,
+         age,
+         bp_systolic,
+         pulse,
+         blood_glucose,
+         temperature,
+         vigilance_4ISS,
+         gaze_head_deviation_4ISS,
+         hemiparesis_4ISS,
+         aphasia_dysarthria_4ISS,
+         medication_anticoags,
+         TOO,
+         exclusion_TOO,
+         pupil_reaction_abnormal,
+         EVT)
+
+
+# for test data
+test_data <- test_data %>% 
+  select(gender,
+         age,
+         bp_systolic,
+         pulse,
+         blood_glucose,
+         temperature,
+         vigilance_4ISS,
+         gaze_head_deviation_4ISS,
+         hemiparesis_4ISS,
+         aphasia_dysarthria_4ISS,
+         medication_anticoags,
+         TOO,
+         exclusion_TOO,
+         pupil_reaction_abnormal,
+         EVT)
+
+```
+
+## Preprocessing
+
+### Set Data Type for CART and Random Forest
+
+**CART**
+
+```{r}
+
+# Set column classes in test data
+test_data_cart <- test_data %>% 
+  mutate(
+    vigilance_4ISS           = factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS         = factor(hemiparesis_4ISS),
+
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    # Ensure outcome variable is a factor
+    EVT = factor(EVT, levels = c("1", "0"))
+  )
+
+```
+
+**Random Forrest**
+
+```{r}
+
+test_data_rf <- test_data %>% 
+  mutate(
+    vigilance_4ISS           = factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS         = factor(hemiparesis_4ISS),
+
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    # Ensure outcome variable is a factor
+    EVT = factor(EVT, levels = c("1", "0"))
+  )
+
+```
+
+### Create 4I-SS Reference
+
+The ML model should outperform the 4-Item Stroke Scale (4I-SS). Therefore, the decisions made by the 4I-SS on the same test set need to be calculated and saved in a separate dataframe for comparison.
+
+```{r}
+
+classification_4ISS <- test_data %>% 
+  mutate(Score_4ISS = hemiparesis_4ISS +
+           vigilance_4ISS +
+           gaze_head_deviation_4ISS +
+           aphasia_dysarthria_4ISS,
+         classification_EVT = as_factor(if_else(Score_4ISS > 2, 1, 0))) %>% 
+  select(Score_4ISS, classification_EVT)
+
+```
+
+### Predictions
+
+**OneR**
+
+The One rule from OneR needs to be manually applied to the data, as `predict()` does not work with the model.
+
+```{r}
+
+# predict with hemiparesis rule
+OneR_predictions_test <- as_factor(ifelse(test_data$hemiparesis_4ISS == 2, 1, 0))
+
+# extract test label
+test_label <- as_factor(test_data$EVT)
+
+# convert to numerical data to mimic probablities for ROC
+probabilities_OneR <- as.numeric(as.character(OneR_predictions_test))
+
+```
+
+**4I-SS**
+
+```{r}
+
+# extract score
+score_4ISS <- classification_4ISS$Score_4ISS
+
+# min/max scaling
+probabilities_score_4ISS <- (score_4ISS - min(score_4ISS)) / (max(score_4ISS) - min(score_4ISS))
+
+# now the values of the 4I-SS can be used as probabilities
+probabilities_score_4ISS
+
+```
+
+**Other Models**
+
+```{r}
+
+probabilities_knn <- predict(final_knn_model,
+                             new_data = test_data,
+                             type = "prob")$.pred_1
+
+probabilities_cart <- predict(final_cart_model,
+                              new_data = test_data_cart,
+                              type = "prob")$.pred_1
+
+probabilities_xgb <- predict(final_xgb_model,
+                             new_data = test_data,
+                             type = "prob")$.pred_1
+
+probabilities_rf <- predict(final_rf_model,
+                            new_data = test_data_rf,
+                            type = "prob")$.pred_1
+
+probabilities_nn <- predict(final_nn_model,
+                            new_data = test_data,
+                            type = "prob")$.pred_1
+
+```
+
+### Get the label
+
+```{r}
+
+# Actual labels for comparison 
+label_test <- test_data$EVT
+
+```
+
+### Get 4ISS Scores from Testdata
+
+```{r}
+
+# 4I-SS scores of test data
+score_4ISS <- classification_4ISS$Score_4ISS
+
+```
+
+## ROC and PROC
+
+**Used the same** color palette **for both plots**
+
+```{r}
+
+# Use the colors of the NEJM color palette
+# We used alpha 0.9 as a filter, that the colors are not as bright
+
+colors_nejm_alpha90 <- c(
+  "#BC3C29E6",
+  "#0072B5E6",
+  "#E18727E6",
+  "#20854EE6",
+  "#7876B1E6",
+  "#6F99ADE6",
+  "#FFDC91E6",
+  "#EE4C97E6"
+)
+
+```
+
+**Mapping**
+
+```{r}
+
+# Map each model's scores to its name in `model_scores` for easy iteration.
+labels <- label_test
+model_scores <- list(
+  `OneR`  = probabilities_OneR,
+  `CART`  = probabilities_cart,
+  `KNN`   = probabilities_knn,
+  `XGB`   = probabilities_xgb,
+  `RF`    = probabilities_rf,
+  `NN`    = probabilities_nn,
+  `4I-SS` = probabilities_score_4ISS
+)
+
+```
+
+### ROC Curve
+
+```{r}
+
+# Configure plotting layout and text scaling
+par(mfrow = c(1, 1),  # single panel
+    pty = "s",        # square plotting region
+    cex = 1.2)        # global text size scaling
+
+# Initialize empty plot area for ROC curves
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100), 
+     xlab = "1 - Specificity (%)", 
+     ylab = "Sensitivity (%)", 
+     main = "")
+
+# Loop through model scores and plot ROC curves
+for (i in seq_along(model_scores)) {
+  roc_curve <- roc.curve(
+    scores.class0 = model_scores[[i]][labels == 1], 
+    scores.class1 = model_scores[[i]][labels == 0], 
+    curve = TRUE
+  )
+  
+  lines(roc_curve$curve[, 1] * 100,  # X: 1 - specificity (%)
+        roc_curve$curve[, 2] * 100,  # Y: sensitivity (%)
+        col = colors_nejm_alpha90[i],
+        lwd = 3)
+}
+
+# diagonal line
+abline(0, 1, lty = 2, col = "black", lwd = 2)
+
+# Add legend to distinguish models
+legend("bottomright",
+       legend = names(model_scores),
+       col = colors_nejm_alpha90,
+       lwd = 3,
+       cex = 0.8,
+       bty = "n")
+
+```
+
+### Precision-Recall Curve
+
+```{r}
+
+# Configure plot layout and text scaling
+par(mfrow = c(1, 1),  # single plot panel
+    pty = "s",        # square plotting region
+    cex = 1.0)        # base text size
+
+# Initialize empty plot area for PR curves (axes only)
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100), 
+     xlab = "Recall (%)", 
+     ylab = "Precision (%)", 
+     main = "")
+
+# Loop through model scores and draw each PR curve
+for (i in seq_along(model_scores)) {
+  pr_curve <- pr.curve(
+    scores.class0 = model_scores[[i]][labels == 1], 
+    scores.class1 = model_scores[[i]][labels == 0], 
+    curve = TRUE
+  )
+  
+  # Plot precision-recall curve, scaled to percentages
+  lines(pr_curve$curve[, 1] * 100,  # recall (%)
+        pr_curve$curve[, 2] * 100,  # precision (%)
+        col = colors_nejm_alpha90[i],
+        lwd = 3)
+}
+
+# prevalence line
+prevalence <- mean(labels == 1) * 100
+abline(h = prevalence, lty = 2, col = "black", lwd = 2)
+
+# Add legend identifying each model curve
+legend("topright",
+       legend = names(model_scores),
+       col = colors_nejm_alpha90,
+       lwd = 3,
+       cex = 0.8,
+       bty = "n")
+
+```
+
+### Combined Presentation
+
+```{r}
+
+# Plot configurations for 1x2 layout
+par(mfrow = c(1, 2),
+    pty = "s",
+    cex = 1.2)
+
+# ROC curves
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100), 
+     xlab = "1 - Specificity (%)", 
+     ylab = "Sensitivity (%)")
+
+for (i in seq_along(model_scores)) {
+  roc_curve <- roc.curve(
+    scores.class0 = model_scores[[i]][labels == 1], 
+    scores.class1 = model_scores[[i]][labels == 0], 
+    curve = TRUE
+  )
+  lines(roc_curve$curve[, 1] * 100, 
+        roc_curve$curve[, 2] * 100, 
+        col = colors_nejm_alpha90[i], lwd = 3)
+}
+
+# Add diagonal random line (black, dashed)
+abline(0, 1, lty = 2, col = "black", lwd = 2)
+
+legend("bottomright",
+       legend = names(model_scores),
+       col = colors_nejm_alpha90,
+       lwd = 4,
+       seg.len = 0.6,
+       x.intersp = 0.2,
+       cex = 1,
+       bty = "n",
+       inset = c(0.03, 0))
+
+# PR curves
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100), 
+     xlab = "Recall (%)", 
+     ylab = "Precision (%)")
+
+for (i in seq_along(model_scores)) {
+  pr_curve <- pr.curve(
+    scores.class0 = model_scores[[i]][labels == 1], 
+    scores.class1 = model_scores[[i]][labels == 0], 
+    curve = TRUE
+  )
+  lines(pr_curve$curve[, 1] * 100, 
+        pr_curve$curve[, 2] * 100, 
+        col = colors_nejm_alpha90[i], lwd = 3)
+}
+
+# Add prevalence baseline (black, dashed)
+prevalence <- mean(labels == 1) * 100
+abline(h = prevalence, lty = 2, col = "black", lwd = 2)
+
+legend("topright",
+       legend = names(model_scores),
+       col = colors_nejm_alpha90,
+       lwd = 4,
+       seg.len = 0.6,
+       x.intersp = 0.2,
+       cex = 1,
+       bty = "n",
+       inset = c(0.03, 0))
+
+```
+
+```{r}
+
+# Plot configurations for 1x2 layout
+par(mfrow = c(1, 2),
+    pty = "s",
+    cex = 1.2)
+
+# ROC curves
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100), 
+     xlab = "1 - Specificity (%)", 
+     ylab = "Sensitivity (%)")
+
+for (i in seq_along(model_scores)) {
+  roc_curve <- roc.curve(
+    scores.class0 = model_scores[[i]][labels == 1], 
+    scores.class1 = model_scores[[i]][labels == 0], 
+    curve = TRUE
+  )
+  lines(roc_curve$curve[, 1] * 100, 
+        roc_curve$curve[, 2] * 100, 
+        col = colors_nejm_alpha90[i], lwd = 3)
+}
+
+# Add diagonal random line
+abline(0, 1, lty = 2, col = "black", lwd = 2)
+
+legend("bottomright",
+       legend = names(model_scores),
+       col = colors_nejm_alpha90,
+       lwd = 4,
+       seg.len = 0.6,
+       x.intersp = 0.2,
+       cex = 1,
+       bty = "n",
+       inset = c(0.03, 0))
+
+# PR curves
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100), 
+     xlab = "Recall (%)", 
+     ylab = "Precision (%)")
+
+for (i in seq_along(model_scores)) {
+  pr_curve <- pr.curve(
+    scores.class0 = model_scores[[i]][labels == 1], 
+    scores.class1 = model_scores[[i]][labels == 0], 
+    curve = TRUE
+  )
+  lines(pr_curve$curve[, 1] * 100, 
+        pr_curve$curve[, 2] * 100, 
+        col = colors_nejm_alpha90[i], lwd = 3)
+}
+
+# Add prevalence baseline
+prevalence <- mean(labels == 1) * 100
+abline(h = prevalence, lty = 2, col = "black", lwd = 2)
+
+legend("topright",
+       legend = names(model_scores),
+       col = colors_nejm_alpha90,
+       lwd = 4,
+       seg.len = 0.6,
+       x.intersp = 0.2,
+       cex = 1,
+       bty = "n",
+       inset = c(0.03, 0))
+
+dev.off()
+
+```
+
+## Area Under the Curves
+
+```{r}
+
+# Initialize a data frame to store AUC values
+auc_table <- data.frame(Model = character(), ROC_AUC = numeric(), PR_AUC = numeric(), stringsAsFactors = FALSE)
+
+# Calculate ROC AUC and PR AUC values for each model
+for (model_name in names(model_scores)) {
+  
+  # ROC AUC
+  roc_result <- roc(labels,
+                    model_scores[[model_name]],
+                    levels = c(0, 1),
+                    direction = "<")
+  
+  roc_auc_value <- as.numeric(auc(roc_result))  
+  
+  # PR AUC
+  pr_result <- pr.curve(scores.class0 = model_scores[[model_name]][labels == 1], 
+                        scores.class1 = model_scores[[model_name]][labels == 0], 
+                        curve = FALSE)
+  pr_auc_value <- pr_result$auc.integral  # Extract PR AUC
+  
+  # Store the AUC values in the table
+  auc_table <- auc_table %>%
+    add_row(Model = model_name,
+            ROC_AUC = roc_auc_value,
+            PR_AUC = pr_auc_value)
+}
+
+# Display the AUC table
+print(auc_table)
+
+```
+
+## Risk Group Analysis
+
+**Create Datasets**
+
+For OneR, kNN and Neural Network
+
+```{r}
+
+# Create a copy of train_data for risk analysis and age groups
+train_data_risk <- train_data %>%
+  mutate(
+    age_group = case_when(
+      age < 60 ~ "<60",
+      age >= 60 & age <= 80 ~ "60-80",
+      age > 80 ~ ">80"
+    )
+  )
+
+```
+
+**Adjust Datatypes**
+
+Random Forrest
+
+```{r}
+
+train_data_risk_rf <- train_data_risk %>% mutate(
+    gender = as.factor(gender),
+    medication_anticoags = as.factor(medication_anticoags),
+    exclusion_TOO = as.factor(exclusion_TOO),
+    pupil_reaction_abnormal = as.factor(pupil_reaction_abnormal),
+    aphasia_dysarthria_4ISS = as.factor(aphasia_dysarthria_4ISS),
+    
+    # Ordinal variables as ordered factors
+    vigilance_4ISS = factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS),
+    EVT = factor(EVT, levels = c("1", "0"))  # Ensure correct factor levels
+)
+
+```
+
+### **Generate Model Predictions**
+
+Predictions are generated for each model on the test data.
+
+The age column is removed to prevent any influence on classification, as it was not included in the training data.
+
+```{r}
+
+# Generate predictions for each model on the training data with risk groups
+
+# OneR model predictions using a rule on the hemiparesis feature
+# Here, a hemiparesis score of 2 is assigned a prediction of 1 (positive), otherwise 0 (negative)
+OneR_predictions_train_risk <- factor(ifelse(train_data_risk$hemiparesis_4ISS == 2, 1, 0), levels = c(0, 1))
+
+# Convert factor predictions to numeric probabilities
+OneR_probabilities_risk <- as.numeric(as.character(OneR_predictions_train_risk))  
+
+# Generate predictions for the KNN model on train_data_risk
+# Exclude the age_group variable to ensure it doesn’t influence predictions
+KNN_probabilities_risk <- predict(final_knn_model, 
+                                  new_data = train_data_risk %>% select(-age_group), 
+                                  type = "prob")$.pred_1  # Extract the predicted probability for class "1"
+
+
+# Generate predictions for the ANN model on train_data_risk
+XGB_probabilities_risk <- predict(final_xgb_model, 
+                                  new_data = train_data_risk %>% select(-age_group), 
+                                  type = "prob")$.pred_1  # Extract probability for class "1"
+
+# Generate predictions for the Random Forest model on train_data_risk_trees
+RF_probabilities_risk <- predict(final_rf_model, 
+                                 new_data = train_data_risk_rf %>% select(-age_group), 
+                                 type = "prob")$.pred_1  # Extract probability for class "1"
+
+# Generate predictions for the ANN model on train_data_risk
+ANN_probabilities_risk <- predict(final_nn_model, 
+                                  new_data = train_data_risk %>% select(-age_group), 
+                                  type = "prob")$.pred_1  # Extract probability for class "1"
+
+
+# Assign row names to train_data_risk based on a unique identifier or row numbers
+# This ensures consistency in indexing when assigning names to each probability prediction
+rownames(train_data_risk) <- as.character(1:nrow(train_data_risk))
+
+# Assign names to each model’s probability output using the row names in train_data_risk
+# This maintains alignment between the data and model predictions
+names(OneR_probabilities_risk) <- rownames(train_data_risk)
+names(KNN_probabilities_risk) <- rownames(train_data_risk)
+names(XGB_probabilities_risk) <- rownames(train_data_risk)
+names(RF_probabilities_risk) <- rownames(train_data_risk)
+names(ANN_probabilities_risk) <- rownames(train_data_risk)
+
+# Combine all model probability predictions into a single list
+# This structure allows for easy access to each model's predictions when calculating ensemble scores or ROC curves
+model_scores_risk <- list(
+  OneR = OneR_probabilities_risk,
+  KNN = KNN_probabilities_risk,
+  XGB = XGB_probabilities_risk,
+  RF = RF_probabilities_risk,
+  ANN = ANN_probabilities_risk
+)
+
+```
+
+**Define Group Lists**
+
+Groups for Gender and Age are defined, and colors are assigned to each for plotting.
+
+```{r}
+
+# Split the training data into risk groups by Gender and Age, preserving row names
+# This allows us to easily subset the data for each group and keep track of individual rows
+
+risk_groups <- list(
+  Gender = split(train_data_risk, train_data_risk$gender),  # Split data into "0" and "1" 
+  Age = split(train_data_risk, train_data_risk$age_group)   # Split data into age groups
+)
+
+# Set labels
+
+age_group_labels <- c("< 60", "60 - 80", "> 80")  # Age group labels
+
+gender_labels <- c("Female", "Male")  # Gender labels for plotting and interpretation
+
+```
+
+**Verify Group Sizes**
+
+If groups are too small ROC Curves can be missleading
+
+```{r}
+
+# Check subgroup sizes
+for (i in 1:length(risk_groups$Age)) {
+  subgroup <- risk_groups$Age[[i]]
+  group_size <- nrow(subgroup)
+  print(paste("Age Group", age_group_labels[i], "Size:", group_size))
+  
+  # Check class distribution
+  EVT_labels_age <- factor(subgroup$EVT, levels = c(0, 1))
+  class_counts <- table(EVT_labels_age)
+  print(paste("Class distribution for Age Group", age_group_labels[i], ":"))
+  print(class_counts)
+}
+
+```
+
+**Aggregate the Predictions of all Models**
+
+```{r}
+
+# Convert the list of model predictions into a data frame
+model_scores_df <- as.data.frame(model_scores_risk)
+
+# Compute the ensemble prediction by averaging the predictions across models
+ensemble_predictions <- rowMeans(model_scores_df, na.rm = TRUE)
+
+```
+
+**More Preprocessing**
+
+```{r}
+
+# Extract actual labels from the dataset, ensuring they are in the correct factor format
+EVT_labels <- factor(train_data_risk$EVT, levels = c(0, 1))
+names(EVT_labels) <- rownames(train_data_risk)  # Assign names to ensure alignment by row
+
+# Verify that the names in EVT_labels match the names in ensemble_predictions
+all_names_match <- all(names(EVT_labels) == names(ensemble_predictions))
+
+# Align EVT_labels and ensemble_predictions by matching names if they do not match
+if (!all_names_match) {
+  common_indices <- intersect(names(EVT_labels), names(ensemble_predictions))  # Find common indices
+  EVT_labels <- EVT_labels[common_indices]  # Subset labels to common indices
+  ensemble_predictions <- ensemble_predictions[common_indices]  # Subset predictions to common indices
+}
+
+# Remove any entries with NA values to ensure clean data for ROC analysis
+na_indices <- which(is.na(EVT_labels) | is.na(ensemble_predictions))
+if (length(na_indices) > 0) {
+  EVT_labels <- EVT_labels[-na_indices]  # Remove NA values from EVT_labels
+  ensemble_predictions <- ensemble_predictions[-na_indices]  # Remove NA values from ensemble_predictions
+}
+
+```
+
+## **Ensemble Stratified ROC Curves and AUC Values**
+
+**Used Same Colors for Both Plots**
+
+```{r}
+
+gender_colors_risk <- colors_nejm_alpha90[6:7]  
+age_colors_risk <- colors_nejm_alpha90[3:5]  
+
+```
+
+### ROC Gender
+
+```{r}
+
+# Plot settings
+par(mfrow = c(1, 1),    # single plot
+    pty = "s",          # square plotting region
+    cex = 1.0)          # base font scaling
+
+# Gender groups and AUC storage
+gender_groups <- c("Female ", "Male")  
+gender_aucs <- c()  # Empty vector to store AUC values for gender
+
+plot_initialized <- FALSE
+
+# Loop over each gender group, plot ROC, calculate AUC
+for (i in 1:length(gender_groups)) {
+  gender_code <- as.character(i - 1)  
+  indices <- which(train_data_risk$gender == gender_code)
+  EVT_labels_subgroup <- EVT_labels[indices]               
+  ensemble_predictions_subgroup <- ensemble_predictions[indices]
+
+  if (length(unique(EVT_labels_subgroup)) < 2) next
+
+  ensemble_roc_subgroup <- roc(
+    EVT_labels_subgroup,
+    ensemble_predictions_subgroup,
+    levels = c(0, 1),
+    direction = "<",
+    percent = TRUE
+  )
+
+  gender_aucs[i] <- round(ensemble_roc_subgroup$auc, 2)
+
+  if (!plot_initialized) {
+    plot(ensemble_roc_subgroup,
+         col = gender_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE,
+         xlab = "1 - Specificity in %",
+         ylab = "Sensitivity in %")
+    plot_initialized <- TRUE
+  } else {
+    plot(ensemble_roc_subgroup,
+         col = gender_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE, add = TRUE)
+  }
+}
+
+# Create legend text with AUC values
+gender_labels_with_auc <- paste(gender_groups, "(AUC:", gender_aucs, ")")
+
+# Add legend
+legend("bottomright",
+       legend = gender_labels_with_auc,
+       col = gender_colors_risk,
+       lwd = 4,
+       cex = 0.8,
+       bty = "n",
+       inset = c(-0.1, 0))
+
+```
+
+### ROC Age Groups
+
+```{r}
+
+# Define colors for age groups using the Acadia palette
+age_colors_risk <- colors_nejm_alpha90[3:5]  # Next three colors for age groups
+
+# Plot configuration
+par(mfrow = c(1, 1),  # single plot panel
+    pty = "s",        # square plot region
+    cex = 1.0)        # global text scaling
+
+# Age Group ROC Curves 
+age_groups <- unique(train_data_risk$age_group)
+age_group_labels <- c("< 60    ", "60 - 80", "> 80    ")
+age_aucs <- c()  # Empty vector to store AUC values
+
+plot_initialized <- FALSE
+
+# Loop through age groups, plot ROC, calculate AUC
+for (i in seq_along(age_groups)) {
+  age_group <- age_groups[i]
+  indices <- which(train_data_risk$age_group == age_group)
+  EVT_labels_subgroup <- EVT_labels[indices]                
+  ensemble_predictions_subgroup <- ensemble_predictions[indices]
+
+  if (length(unique(EVT_labels_subgroup)) < 2) next
+
+  ensemble_roc_subgroup <- roc(
+    EVT_labels_subgroup,
+    ensemble_predictions_subgroup,
+    levels = c(0, 1),
+    direction = "<",
+    percent = TRUE
+  )
+
+  age_aucs[i] <- round(ensemble_roc_subgroup$auc, 2)
+
+  if (!plot_initialized) {
+    plot(ensemble_roc_subgroup,
+         col = age_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE,
+         xlab = "1 - Specificity in %",
+         ylab = "Sensitivity in %")
+    plot_initialized <- TRUE
+  } else {
+    plot(ensemble_roc_subgroup,
+         col = age_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE,
+         add = TRUE)
+  }
+}
+
+# Create legend labels with AUCs
+age_labels_with_auc <- paste(age_group_labels, "(AUC:", age_aucs, ")")
+
+# Add legend
+legend("bottomright",
+       legend = age_labels_with_auc,
+       col = age_colors_risk,
+       lwd = 4,
+       cex = 0.8,
+       bty = "n",
+       inset = c(-0.1, 0))
+
+```
+
+### Combined Presentation
+
+```{r}
+
+# Configure a 1x2 plotting layout and increase font size globally
+par(mfrow = c(1, 2),
+    pty = "s",
+    cex = 1.2)
+
+# Gender Group ROC Curves
+gender_groups <- c("Female ", "Male")  
+gender_aucs <- c()
+plot_initialized <- FALSE
+
+for (i in 1:length(gender_groups)) {
+  gender_code <- as.character(i - 1)  
+  indices <- which(train_data_risk$gender == gender_code)
+  EVT_labels_subgroup <- EVT_labels[indices]               
+  ensemble_predictions_subgroup <- ensemble_predictions[indices]
+  if (length(unique(EVT_labels_subgroup)) < 2) next
+
+  ensemble_roc_subgroup <- roc(EVT_labels_subgroup,
+                               ensemble_predictions_subgroup,
+                               levels = c(0, 1),
+                               direction = "<",
+                               percent = TRUE)
+  
+  gender_aucs[i] <- round(ensemble_roc_subgroup$auc, 0)
+
+  if (!plot_initialized) {
+    plot(ensemble_roc_subgroup,
+         col = gender_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE,
+         xlab = "1 - Specificity in %",
+         ylab = "Sensitivity in %")
+    plot_initialized <- TRUE
+  } else {
+    plot(ensemble_roc_subgroup,
+         col = gender_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE, add = TRUE)
+  }
+}
+
+gender_labels_with_auc <- paste(gender_groups, "( AUC:", gender_aucs, ")")
+legend("bottomright", legend = gender_labels_with_auc,
+       col = gender_colors_risk,
+       lwd = 4,
+       seg.len = 0.6,
+       x.intersp = 0.2,
+       bty = "n",
+       inset = c(-0.4, 0))
+
+
+# Age Group ROC Curves
+age_groups <- unique(train_data_risk$age_group)
+age_group_labels <- c("    < 60", "60 - 80", "    > 80")
+age_aucs <- c()
+plot_initialized <- FALSE
+
+for (i in 1:length(age_groups)) {
+  age_group <- age_groups[i]
+  indices <- which(train_data_risk$age_group == age_group)
+  EVT_labels_subgroup <- EVT_labels[indices]                
+  ensemble_predictions_subgroup <- ensemble_predictions[indices]
+  if (length(unique(EVT_labels_subgroup)) < 2) next
+
+  ensemble_roc_subgroup <- roc(EVT_labels_subgroup, ensemble_predictions_subgroup,
+                               levels = c(0, 1), direction = "<", percent = TRUE)
+  age_aucs[i] <- round(ensemble_roc_subgroup$auc, 0)
+
+  if (!plot_initialized) {
+    plot(ensemble_roc_subgroup,
+         col = age_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE,
+         xlab = "1 - Specificity in %",
+         ylab = "Sensitivity in %")
+    plot_initialized <- TRUE
+  } else {
+    plot(ensemble_roc_subgroup,
+         col = age_colors_risk[i], lwd = 4,
+         legacy.axes = TRUE, add = TRUE)
+  }
+}
+
+age_labels_with_auc <- paste(age_group_labels, "( AUC:", age_aucs, ")")
+legend("bottomright", legend = age_labels_with_auc,
+       col = age_colors_risk,
+       lwd = 4,
+       seg.len = 0.6,
+       x.intersp = 0.2,
+       bty = "n",
+       inset = c(-0.38, 0))
+
+# Reset layout to default
+par(mfrow = c(1, 1))
+
+```

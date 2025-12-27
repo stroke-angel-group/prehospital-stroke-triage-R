@@ -1,0 +1,740 @@
+---
+title: "Exploratory Data Analysis"
+editor: visual
+---
+
+## Load Packages
+
+```{r}
+
+library(here) # Project-relative paths & file management
+
+library(DT) # Present tables using DT
+
+library(tidyverse) # Data manipulation
+library(ggpubr) # Create publication ready plots
+library(crosstable) # Create easy crosstables
+library(rsample) # For the train- test split
+library(flextable) # To save the crosstable html output
+
+library(tidymodels) # For Imputation
+
+library(gridExtra) # Display pie charts
+ 
+```
+
+**Define readable Variable Labels**
+
+```{r}
+
+# Define readable labels
+variable_labels <- c(
+  gender = "Gender",
+  age = "Age",
+  bp_systolic = "Systolic BP",
+  bp_diastolic = "Diastolic BP",
+  pulse = "Pulse",
+  blood_glucose = "Blood Glucose",
+  temperature = "Temperature",
+  vigilance_4ISS = "4I-SS Vigilance",
+  gaze_head_deviation_4ISS = "4I-SS Gaze Head Deviation",
+  hemiparesis_4ISS = "4I-SS Hemiparesis",
+  aphasia_dysarthria_4ISS = "4I-SS Aphasia Dysarthria",
+  score_4ISS = "4I-SS Total",
+  GCS_eyes = "GCS Eyes",
+  GCS_motor = "GCS Motor",
+  GCS_verbal = "GCS Verbal",
+  score_GCS = "GCS Total",
+  NIHSS_at_admission = "NIHSS at Admission",
+  medication_anticoags = "Medication Anticoags",
+  medication_antiplatelets = "Medication Antiplatelets",
+  TOO = "Time of Onset (TOO)",
+  exclusion_TOO = "Exclusion TOO",
+  exclusion_anticoag_status = "Exclusion Anticoag Status",
+  exclusion_surgery_status = "Exclusion Surgery Status",
+  DTN = "Door to Needle",
+  DTCT = "Door to CT",
+  diagnosis_discharge = "Diagnosis at Discharge",
+  pre_existing_neurological_deficit = "Pre-existing Neurological Deficit",
+  IVT = "IVT",
+  EVT = "EVT",
+  pupil_reaction_abnormal = "Abnormal Pupil Reaction",
+  consciousness_impaired = "Consciousness Impaired",
+  mortality = "Mortality",
+  infection = "Infection"
+)
+```
+
+# Raw Data
+
+```{r}
+
+stroke_triage_data_raw <- read_csv(here("Code",
+                                        "Exploratory Data Analysis",
+                                        "stroke_triage_data_raw.csv"))
+
+```
+
+**Set correct data type**
+
+```{r}
+
+stroke_triage_data_raw <- stroke_triage_data_raw %>%
+  mutate(
+    gender = as.factor(gender),
+    age = as.integer(age),
+    bp_systolic = as.integer(bp_systolic),
+    bp_diastolic = as.integer(bp_diastolic),
+    pulse = as.integer(pulse),
+    blood_glucose = as.integer(blood_glucose),
+    temperature = as.numeric(temperature),
+    vigilance_4ISS = as.factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = as.factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS = as.factor(hemiparesis_4ISS),
+    aphasia_dysarthria_4ISS = as.factor(aphasia_dysarthria_4ISS),
+    score_4ISS = as.integer(score_4ISS),
+    GCS_eyes = as.integer(GCS_eyes),
+    GCS_motor = as.integer(GCS_motor),
+    GCS_verbal = as.integer(GCS_verbal),
+    score_GCS = as.integer(score_GCS),
+    infection = as.factor(infection),
+    NIHSS_at_admission = as.integer(NIHSS_at_admission),
+    medication_anticoags = as.factor(medication_anticoags),
+    medication_antiplatelets = as.factor(medication_antiplatelets),
+    TOO = as.numeric(TOO),
+    exclusion_TOO = as.factor(exclusion_TOO),
+    exclusion_anticoag_status = as.factor(exclusion_anticoag_status),
+    exclusion_surgery_status = as.factor(exclusion_surgery_status),
+    DTN = as.integer(DTN),
+    DTCT = as.integer(DTCT),
+    diagnosis_admission = as.character(diagnosis_admission),
+    diagnosis_discharge = as.character(diagnosis_discharge),
+    IVT = as.factor(IVT),
+    EVT = as.factor(EVT),
+    mortality = as.factor(mortality),
+    pupil_reaction_abnormal = as.factor(pupil_reaction_abnormal),
+    consciousness_impaired = as.factor(consciousness_impaired),
+    pre_existing_neurological_deficit = as.factor(pre_existing_neurological_deficit)
+  )
+
+```
+
+**Glimpse at the data**
+
+```{r}
+
+# Display the first few rows of the dataset
+str(stroke_triage_data_raw)
+
+```
+
+# Preprocessed Data
+
+**Import Data**
+
+```{r}
+
+# Import data from CSV file
+stroke_triage_data_preprocessed <- read_csv(here("Code", "Exploratory Data Analysis", "stroke_triage_data_preprocessed.csv"))
+
+```
+
+**Set correct data type**
+
+```{r}
+
+stroke_triage_data_preprocessed <- stroke_triage_data_preprocessed %>%
+  mutate(
+    gender = as.factor(gender),
+    vigilance_4ISS = as.factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = as.factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS = as.factor(hemiparesis_4ISS),
+    aphasia_dysarthria_4ISS = as.factor(aphasia_dysarthria_4ISS),
+    medication_anticoags = as.factor(medication_anticoags),
+    exclusion_TOO = as.factor(exclusion_TOO),
+    pupil_reaction_abnormal = as.factor(pupil_reaction_abnormal),
+    EVT = as.factor(EVT),
+    ways_of_admission_transport = as.factor(ways_of_admission_transport),
+    ways_of_admission_origin = as.factor(ways_of_admission_origin),
+    year_of_arrival = as.factor(year_of_arrival),
+    diagnosis_discharge = as.factor(diagnosis_discharge)
+  )
+
+```
+
+**Glimpse at the data**
+
+```{r}
+
+# Display the first few rows of the dataset
+str(stroke_triage_data_preprocessed)
+
+```
+
+## Compare Raw, Preprocessed, Train and Testdata
+
+### Get Raw Data
+
+**Extract just the variables available in the Dataset after preprocessing**
+
+```{r}
+
+full_data_raw <- stroke_triage_data_raw %>%
+  select(all_of(colnames(stroke_triage_data_preprocessed)))
+
+```
+
+### Get Train and Test-Data
+
+Same Train- and Test-Data split as for model training
+
+```{r}
+
+# Same seed as for the Splits for the model training
+set.seed(456)
+
+# Split the dataset into training and testing sets
+stroke_trage_data_split <- initial_split(stroke_triage_data_preprocessed,
+                                         prop = 0.8,
+                                         strata = EVT) # ensures that EVT prevalence is similar in train and testdata
+
+
+# create seperate dataframes
+train_data <- stroke_trage_data_split %>% training()
+test_data <- stroke_trage_data_split %>% testing()
+
+```
+
+### Impute Data
+
+**Set Data Types for Imputation**
+
+```{r}
+
+# Ensure correct data types for train_data
+train_data <- train_data %>%
+  mutate(
+    # Ordinal categorical variables (0,1,2)
+    vigilance_4ISS = factor(vigilance_4ISS,
+                            levels = c(0, 1, 2),
+                            ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = TRUE),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS,
+                              levels = c(0, 1, 2),
+                              ordered = TRUE),
+    
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = as_factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+    exclusion_anticoag_status = factor(exclusion_anticoag_status),
+    consciousness_impaired = factor(consciousness_impaired),
+    ways_of_admission_transport = factor(ways_of_admission_transport),
+    ways_of_admission_origin = factor(ways_of_admission_origin),
+    year_of_arrival = factor(year_of_arrival),
+    diagnosis_discharge = factor(diagnosis_discharge),
+
+    
+    # Outcome variable
+    EVT = factor(EVT, levels = c("0", "1")),
+    
+    # Convert IVT to factor
+    IVT = factor(IVT)
+  )
+
+# Apply the same transformations to test_data
+test_data <- test_data %>%
+  mutate(
+    # Ordinal categorical variables (0,1,2)
+    vigilance_4ISS = factor(vigilance_4ISS,
+                            levels = c(0, 1, 2),
+                            ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = TRUE),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS,
+                              levels = c(0, 1, 2),
+                              ordered = TRUE),
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+    exclusion_anticoag_status = factor(exclusion_anticoag_status),
+    consciousness_impaired = factor(consciousness_impaired),
+    ways_of_admission_transport = factor(ways_of_admission_transport),
+    ways_of_admission_origin = factor(ways_of_admission_origin),
+    year_of_arrival = factor(year_of_arrival),
+    
+    EVT = factor(EVT, levels = c("0", "1")),
+    
+    IVT = factor(IVT)
+  )
+
+```
+
+We analyzed the `data_manipulation_5_imputation.qmd` file and found that `step_impute_bag()` provides the most suitable imputation method for our dataset.
+
+Each feature with missing values is treated as the **target (label)**, while all other available features act as **predictors**. Multiple decision trees (like in Random Forest, but each tree uses all predictors) are trained on different random subsets of the data. The missing values are then predicted using these models, and this process is repeated separately for each variable with missing data.
+
+```{r}
+
+# Define the recipe for imputation using bagged trees (if needed)
+imputation_recipe <- recipe(EVT ~ ., data = train_data) %>%
+  step_impute_bag(all_predictors())
+
+# Train the recipe using only the training data
+trained_imputation_recipe <- imputation_recipe %>%
+  prep(training = train_data, retain = TRUE)
+
+# Apply the trained recipe separately to training and test data (if imputation is required)
+train_data <- bake(trained_imputation_recipe, new_data = train_data)
+test_data  <- bake(trained_imputation_recipe, new_data = test_data)
+
+```
+
+### Create Four Dataframes for Comparison
+
+Add a column "Dataset" to each dataframe to distinguish data sources for later grouping
+
+```{r}
+
+full_data_raw <- full_data_raw %>% mutate(Dataset = "Unprocessed")
+
+full_data_preprocessed <- bind_rows(train_data, test_data) %>% mutate(Dataset = "Preprocessed")
+
+train_data <-train_data %>% mutate(Dataset = "Training")
+
+test_data <- test_data %>% mutate(Dataset = "Test")
+
+```
+
+### **Calculate the Sum of the 4I-SS**
+
+This step must be performed after imputation to ensure that, in the rare cases where one of the four items is NA, the sum calculation does not produce an error.
+
+```{r}
+
+# Unprocessed data: add dataset label and compute 4ISS sum as factor
+full_data_raw <- full_data_raw %>% 
+  mutate(
+    sum_4ISS = factor(
+      as.numeric(as.character(vigilance_4ISS)) +
+        as.numeric(as.character(gaze_head_deviation_4ISS)) +
+        as.numeric(as.character(hemiparesis_4ISS)) +
+        as.numeric(as.character(aphasia_dysarthria_4ISS)),
+      ordered = TRUE
+    ))
+
+# Training data: add dataset label and compute 4ISS sum as factor
+train_data <- train_data %>% 
+  mutate(
+    sum_4ISS = factor(
+      as.numeric(as.character(vigilance_4ISS)) +
+        as.numeric(as.character(gaze_head_deviation_4ISS)) +
+        as.numeric(as.character(hemiparesis_4ISS)) +
+        as.numeric(as.character(aphasia_dysarthria_4ISS)),
+      ordered = TRUE
+    ))
+
+# Test data: add dataset label and compute 4ISS sum as factor
+test_data <- test_data %>% 
+  mutate(
+    sum_4ISS = factor(
+      as.numeric(as.character(vigilance_4ISS)) +
+        as.numeric(as.character(gaze_head_deviation_4ISS)) +
+        as.numeric(as.character(hemiparesis_4ISS)) +
+        as.numeric(as.character(aphasia_dysarthria_4ISS)),
+      ordered = TRUE
+    ))
+
+# Preprocessed data: add dataset label and compute 4ISS sum as factor
+full_data_preprocessed <- full_data_preprocessed %>% 
+  mutate(
+    sum_4ISS = factor(
+      as.numeric(as.character(vigilance_4ISS)) +
+        as.numeric(as.character(gaze_head_deviation_4ISS)) +
+        as.numeric(as.character(hemiparesis_4ISS)) +
+        as.numeric(as.character(aphasia_dysarthria_4ISS)),
+      ordered = TRUE
+    ))
+
+```
+
+### **Calculate the NIHSS Groups for all Datasets**
+
+```{r}
+
+# Unprocessed data: create NIHSS category as ordered factor
+full_data_raw <- full_data_raw %>% 
+  mutate(
+    NIHSS_group = case_when(
+      NIHSS_at_admission <= 4              ~ "0-4",
+      NIHSS_at_admission > 4 & NIHSS_at_admission <= 15 ~ "5-15",
+      NIHSS_at_admission > 15              ~ ">15",
+      TRUE                                 ~ NA_character_
+    ),
+    NIHSS_group = factor(
+      NIHSS_group,
+      levels  = c("0-4", "5-15", ">15"),
+      ordered = TRUE
+    )
+  )
+
+# Training data: create NIHSS category as ordered factor
+train_data <- train_data %>% 
+  mutate(
+    NIHSS_group = case_when(
+      NIHSS_at_admission <= 4              ~ "0-4",
+      NIHSS_at_admission > 4 & NIHSS_at_admission <= 15 ~ "5-15",
+      NIHSS_at_admission > 15              ~ ">15",
+      TRUE                                 ~ NA_character_
+    ),
+    NIHSS_group = factor(
+      NIHSS_group,
+      levels  = c("0-4", "5-15", ">15"),
+      ordered = TRUE
+    )
+  )
+
+# Test data: create NIHSS category as ordered factor
+test_data <- test_data %>% 
+  mutate(
+    NIHSS_group = case_when(
+      NIHSS_at_admission <= 4              ~ "0-4",
+      NIHSS_at_admission > 4 & NIHSS_at_admission <= 15 ~ "5-15",
+      NIHSS_at_admission > 15              ~ ">15",
+      TRUE                                 ~ NA_character_
+    ),
+    NIHSS_group = factor(
+      NIHSS_group,
+      levels  = c("0-4", "5-15", ">15"),
+      ordered = TRUE
+    )
+  )
+
+# Preprocessed data: create NIHSS category as ordered factor
+full_data_preprocessed <- full_data_preprocessed %>% 
+  mutate(
+    NIHSS_group = case_when(
+      NIHSS_at_admission <= 4              ~ "0-4",
+      NIHSS_at_admission > 4 & NIHSS_at_admission <= 15 ~ "5-15",
+      NIHSS_at_admission > 15              ~ ">15",
+      TRUE                                 ~ NA_character_
+    ),
+    NIHSS_group = factor(
+      NIHSS_group,
+      levels  = c("0-4", "5-15", ">15"),
+      ordered = TRUE
+    )
+  )
+
+```
+
+## **Select 14 Features from Feature Selection Process + More Selected Variables**
+
+We selected the 14 features that were identified during the feature selection step of the training process. These are the only features that are meaningful for comparison, as they were consistently used to train the models. In addition, we included the 4I-SS sum, NIHSS at admission, year of arrival, the mode of transport (EMS with or without an emergency physician), and the origin of admission (EMS via emergency call, drip-and-ship, general practitioner) to verify whether the datasets used in the machine learning pipeline still represent the original data.
+
+Since the selection is repeated across four different iterations, we define a reusable function named `select_features()` to ensure consistency and reproducibility.
+
+We also add the technical `Dataset` column for using the `by =` function later.
+
+**Create Feature Selection Function**
+
+```{r}
+
+select_features <- function(data) {
+  dplyr::select(
+    data,
+    gender,
+    age,
+    bp_systolic,
+    bp_diastolic,
+    pulse,
+    blood_glucose,
+    temperature,
+    vigilance_4ISS,
+    gaze_head_deviation_4ISS,
+    hemiparesis_4ISS,
+    aphasia_dysarthria_4ISS,
+    sum_4ISS,
+    NIHSS_group,
+    medication_anticoags,
+    TOO,
+    exclusion_TOO,
+    pupil_reaction_abnormal,
+    EVT,
+    ways_of_admission_transport,
+    ways_of_admission_origin,
+    year_of_arrival,
+    diagnosis_discharge,
+    Dataset
+  )
+}
+
+```
+
+**Apply Function**
+
+```{r}
+
+full_data_raw <-          select_features(full_data_raw)
+
+full_data_preprocessed <- select_features(full_data_preprocessed)
+
+train_data <-             select_features(train_data)
+
+test_data <-              select_features(test_data)
+
+```
+
+Also set variable types of the `full_data_raw` and `full_data_preprocessed` for using `bind_rows`.
+
+```{r}
+
+# Apply transformations to full_data_raw
+full_data_raw <- full_data_raw %>%
+  mutate(
+    gender = factor(gender),
+    vigilance_4ISS = factor(vigilance_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    sum_4ISS = as.factor(sum_4ISS),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+    EVT = factor(EVT, levels = c("0", "1")),
+  )
+
+# Apply the same transformations to full_data_preprocessed
+full_data_preprocessed <- full_data_preprocessed %>%
+  mutate(
+    gender = factor(gender),
+    vigilance_4ISS = factor(vigilance_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    sum_4ISS = as.factor(sum_4ISS),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+    EVT = factor(EVT, levels = c("0", "1")),
+  )
+
+```
+
+### Combine All Datasets for Comparison
+
+```{r}
+
+# Combine all datasets into one dataframe
+combined_data <- bind_rows(full_data_raw, full_data_preprocessed, train_data, test_data)
+
+```
+
+```{r}
+
+# Set the Dataset column as a factor with the desired order
+combined_data <- combined_data %>%
+  mutate(Dataset = factor(Dataset, levels = c("Unprocessed",
+                                              "Preprocessed",
+                                              "Training",
+                                              "Test")))
+
+```
+
+## Create Crosstable
+
+**Define Labels**
+
+```{r}
+
+# Define the variable labels in a dataframe
+variable_labels <- data.frame(
+  name = c("gender",
+           "age",
+           "bp_systolic",
+           "bp_diastolic",
+           "pulse",
+           "blood_sugar",
+           "temperature",
+           "vigilance_4ISS",
+           "gaze_head_deviation_4ISS",
+           "hemiparesis_4ISS",
+           "aphasia_dysarthria_4ISS",
+           "score_4ISS",
+           "GCS_eyes",
+           "GCS_motor",
+           "GCS_verbal",
+           "score_GCS",
+           "NIHSS_at_admission",
+           "medication_anticoags",
+           "medication_antiplatelets",
+           "TOO", "exclusion_TOO",
+           "exclusion_anticoag_status",
+           "exclusion_surgery_status", 
+           "DTN",
+           "DTCT",
+           "diagnosis_discharge",
+           "pre_existing_neurological_deficit",
+           "IVT", 
+           "EVT",
+           "pupil_reaction_abnormal",
+           "consciousness_impaired",
+           "mortality",
+           "infection"),
+  
+  label = c("Gender",
+            "Age",
+            "Systolic BP",
+            "Diastolic BP",
+            "Pulse",
+            "Blood Glucose",
+            "Temperature",
+            "4I-SS Vigilance",
+            "4I-SS Gaze Head Deviation",
+            "4I-SS Hemiparesis", 
+            "4I-SS Aphasia Dysarthria",
+            "4I-SS Total",
+            "GCS Eyes",
+            "GCS Motor",
+            "GCS Verbal",
+            "GCS Total",
+            "NIHSS at Admission",
+            "Medication Anticoags",
+            "Medication Antiplatelets", 
+            "Time of Onset (TOO)",
+            "Exclusion TOO",
+            "Exclusion Anticoag Status", 
+            "Exclusion Surgery Status",
+            "Door to Needle",
+            "Door to CT",
+            "Diagnosis at Discharge", 
+            "Pre-existing Neurological Deficit",
+            "IVT",
+            "EVT",
+            "Abnormal Pupil Reaction", 
+            "Consciousness Impaired",
+            "Mortality",
+            "Infection")
+)
+
+# Import labels to combined_data
+combined_data <- combined_data %>% 
+  import_labels(variable_labels, name_from = "name", label_from = "label")
+
+```
+
+```{r}
+
+# Create the crosstable with min/max and median/IQR only, without the mean
+cross_table <- crosstable(combined_data,
+                          by = "Dataset",
+                          total = "col",
+                          percent_pattern = "{n} ({p_col})",
+                          percent_digits = 0) %>%
+  as_flextable()
+
+# Display the flextable
+cross_table
+
+```
+
+## Sampling Ratio
+
+Pie charts show the changes in class distribution caused by the sampling process. The charts visualize the ratio of EVT (minority class) and No EVT (majority class) both before and after the sampling methods applied by each model.
+
+```{r}
+
+# Original data
+total_instances <- 922
+minority_count <- 58
+majority_count <- total_instances - minority_count
+
+# Sampling parameters for each algorithm
+sampling_parameters <- tibble(
+  Algorithm = c("Original Data",
+                "OneR (Down)",
+                "kNN (Over and Down)",
+                "Decision Tree (Down)",
+                "Random Forest (Down)",
+                "Neural Network (Over and Down)"),
+  Under_Ratio = c(NA, 1.0, 0.6, 1.0, 1.0, 1.0), # NA for Original Data
+  Over_Ratio = c(NA, NA, 0.3, NA, NA, 0.5)      # NA where no oversampling is applied
+)
+
+# Function to calculate oversampling and downsampling
+calculate_sampling <- function(under_ratio, over_ratio, minority, majority) {
+  if (!is.na(over_ratio)) {
+    # Apply oversampling: Increase minority class
+    minority <- round(majority * over_ratio)
+  }
+  if (!is.na(under_ratio)) {
+    # Apply undersampling: Reduce majority class
+    majority <- round(minority * under_ratio)
+  }
+  return(c(minority, majority))
+}
+
+# Apply sampling to each algorithm
+sampling_results <- sampling_parameters %>%
+  rowwise() %>%
+  mutate(
+    Counts = list(calculate_sampling(Under_Ratio, Over_Ratio, minority_count, majority_count)),
+    Minority = Counts[1],
+    Majority = Counts[2]
+  ) %>%
+  select(-Counts)
+
+# Reshape data for plotting
+plot_data <- sampling_results %>%
+  pivot_longer(cols = c(Minority, Majority), 
+               names_to = "Class", 
+               values_to = "Count") %>%
+  group_by(Algorithm) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+
+# Colors for the classes
+colors <- c("Minority" = "#EA5B57FF", "Majority" = "#1B80ADFF")
+
+# Custom legend labels
+legend_labels <- c("Majority" = "No EVT", "Minority" = "EVT")
+
+# Create pie charts for each algorithm
+plots <- list()
+
+for (algo in unique(plot_data$Algorithm)) {
+  data <- plot_data %>% filter(Algorithm == algo)
+  
+  p <- ggplot(data, aes(x = "", y = Count, fill = Class)) +
+    geom_bar(stat = "identity", width = 1, color = "white") +
+    coord_polar(theta = "y") +
+    labs(
+      title = algo,
+      subtitle = paste0("Majority: ", data$Count[data$Class == "Majority"],
+                         " | Minority: ", data$Count[data$Class == "Minority"])
+    ) +
+    scale_fill_manual(
+      values = colors,
+      labels = legend_labels # Custom legend labels
+    ) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12),
+      plot.subtitle = element_text(hjust = 0.5, size = 10),
+      legend.title = element_blank() # Remove "Class" label
+    )
+  
+  plots[[algo]] <- p
+}
+
+# Display all pie charts
+library(gridExtra)
+do.call(grid.arrange, c(plots, ncol = 2))
+
+```

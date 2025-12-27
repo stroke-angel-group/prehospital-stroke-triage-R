@@ -1,0 +1,29 @@
+# Block all files
+*
+
+# Allow project metadata and documentation
+!README.md
+!LICENSE
+!.gitignore
+
+# Allow Quarto files
+!*.qmd
+
+
+# Allow png for the file overview
+!*.png
+
+
+# Allow folder 
+!Data Preprocessing/
+!Evaluation/
+!Exploratory Data Analysis/
+!Feature Importance/
+!Machine Learning/
+
+# Explicitly exclude data and system artifacts
+Data Preprocessing/*.csv
+.Rproj.user/
+.DS_Store
+.Rhistory
+.RData

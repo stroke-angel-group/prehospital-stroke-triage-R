@@ -1,0 +1,1242 @@
+---
+title: "Feature Importance"
+author: "Oliver Moser"
+editor: visual
+---
+
+### Load Packages
+
+```{r}
+
+# Project-relative paths & file management
+library(here)
+
+library(tidyverse)
+library(tidymodels)
+
+# Exploratory Model Analysis
+library(DALEX)        # core
+library(DALEXtra)     # helpers for tidymodels
+library(iBreakDown)   # SHAP calculation
+
+# calculate ROC loss
+library(pROC)
+
+# for permutation
+library(ingredients)
+
+# Plotting
+library(scales)    
+library(ggsci)
+library(patchwork)
+library(ggbeeswarm)
+
+```
+
+### Load Data
+
+```{r}
+
+stroke_triage_data <- read_csv(here("Code",
+                                    "Data Preprocessing",
+                                    "data_manipulation_6_SFS",
+                                    "data_manipulation_6_SFS.csv"))
+
+```
+
+### Load Models
+
+```{r}
+
+# Load each model directly with here()
+
+final_knn_model  <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_knn_model.rds"))
+final_cart_model <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_cart_model.rds"))
+final_xgb_model  <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_xgb_model.rds"))
+final_rf_model   <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_rf_model.rds"))
+final_nn_model   <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "final_nn_model.rds"))
+
+```
+
+**Create OneR Model for the One Rule**
+
+```{r}
+
+final_oneR_model <- function(model, newdata) {
+  as.numeric(newdata$hemiparesis_4ISS == 2)
+}
+
+```
+
+# Preprocessing
+
+## Train-Test Data Split
+
+```{r}
+
+# Set seed for reproducible and comparable Train-Test split
+# across different algorithms
+set.seed(456)
+
+# Split the dataset into training and testing sets
+stroke_triage_data_split <- initial_split(stroke_triage_data,
+                                         prop = 0.8,
+                                         strata = EVT) 
+
+# create separate dataframes
+train_data <- stroke_triage_data_split %>% training()
+test_data <- stroke_triage_data_split %>% testing()
+
+stroke_triage_data_split
+
+```
+
+## Imputation
+
+**Set Data Types for Imputation**
+
+```{r}
+
+# Ensure correct data types for train data
+train_data <- train_data %>%
+  mutate(
+    vigilance_4ISS = factor(vigilance_4ISS, levels = c(0, 1, 2)),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS, levels = c(0, 1, 2)),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS, levels = c(0, 1, 2)),
+
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    EVT = factor(EVT, levels = c("1", "0")) 
+  )
+
+# Apply the same transformations to test data
+test_data <- test_data %>%
+  mutate(
+    vigilance_4ISS = factor(vigilance_4ISS, levels = c(0, 1, 2)),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS, levels = c(0, 1, 2)),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS, levels = c(0, 1, 2)),
+
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    EVT = factor(EVT, levels = c("1", "0"))
+  )
+        
+```
+
+**Apply Bagged Tree Imputation**
+
+We analyzed the `data_manipulation_5_imputation.qmd` file and found that `step_impute_bag()` provides the most suitable imputation method for our dataset.
+
+Each feature with missing values is treated as the **target (label)**, while all other available features act as **predictors**. Multiple decision trees (like in Random Forest, but each tree uses all predictors) are trained on different random subsets of the data. The missing values are then predicted using these models, and this process is repeated separately for each variable with missing data.
+
+```{r}
+
+# Define the recipe for imputation using bagged trees
+imputation_recipe <- recipe(EVT ~ ., data = train_data) %>%
+  step_impute_bag(all_predictors())  
+
+# Train the recipe using only the training data
+trained_imputation_recipe <- imputation_recipe %>%
+  prep(training = train_data, retain = TRUE)  
+
+# Apply the trained recipe separately to training and test data
+train_data <- bake(trained_imputation_recipe, new_data = train_data)  
+test_data  <- bake(trained_imputation_recipe, new_data = test_data)  
+
+```
+
+Convert all Factors to Numeric
+
+```{r}
+#| warning: false
+
+train_data <- train_data %>%
+  # Convert factors to numeric
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))), 
+  # Convert the label as numeric for DALEX
+  EVT = as.numeric(as.character(EVT))  
+  )
+
+test_data <- test_data %>%
+  # Convert factors to numeric
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))), 
+  # Convert the label as numeric for DALEX
+  EVT = as.numeric(as.character(EVT))  
+  )
+
+```
+
+## Select Features Manually
+
+**Get Current Features**
+
+```{r}
+
+colnames(stroke_triage_data)
+
+```
+
+**Select 14 Features from Feature Selection**
+
+```{r}
+
+# for train data
+train_data <- train_data %>% 
+  select(gender,
+         age,
+         bp_systolic,
+         pulse,
+         blood_glucose,
+         temperature,
+         vigilance_4ISS,
+         gaze_head_deviation_4ISS,
+         hemiparesis_4ISS,
+         aphasia_dysarthria_4ISS,
+         medication_anticoags,
+         TOO,
+         exclusion_TOO,
+         pupil_reaction_abnormal,
+         EVT)
+
+
+# for test data
+test_data <- test_data %>% 
+  select(gender,
+         age,
+         bp_systolic,
+         pulse,
+         blood_glucose,
+         temperature,
+         vigilance_4ISS,
+         gaze_head_deviation_4ISS,
+         hemiparesis_4ISS,
+         aphasia_dysarthria_4ISS,
+         medication_anticoags,
+         TOO,
+         exclusion_TOO,
+         pupil_reaction_abnormal,
+         EVT)
+
+```
+
+## Data Types
+
+**Set Data Type for CART and Random Forest**
+
+**CART**
+
+```{r}
+
+# Set column classes in train data
+train_data_cart <- train_data %>%
+  mutate(
+    # Ordinal categorical variables (0,1,2)
+    vigilance_4ISS           = factor(vigilance_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    hemiparesis_4ISS         = factor(hemiparesis_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    # Ensure outcome variable is NUMERIC for DALEX
+    EVT = as.numeric(as.character(EVT)) 
+    )
+
+# Set column classes in test data
+test_data_cart <- test_data %>%
+  mutate(
+    # Ordinal categorical variables (0,1,2)
+    vigilance_4ISS           = factor(vigilance_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    hemiparesis_4ISS         = factor(hemiparesis_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    # Ensure outcome variable is NUMERIC for DALEX
+    EVT = as.numeric(as.character(EVT)) 
+    )
+
+```
+
+**Random Forrest**
+
+```{r}
+
+train_data_rf <- train_data %>%
+  mutate(
+    # Ordinal categorical variables (0,1,2)
+    vigilance_4ISS           = factor(vigilance_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    hemiparesis_4ISS         = factor(hemiparesis_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    # Ensure outcome variable is NUMERIC for DALEX
+    EVT = as.numeric(as.character(EVT)) 
+    )
+  
+
+test_data_rf <- test_data %>%
+  mutate(
+    # Ordinal categorical variables (0,1,2)
+    vigilance_4ISS           = factor(vigilance_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+    
+    hemiparesis_4ISS         = factor(hemiparesis_4ISS,
+                                      levels = c(0, 1, 2),
+                                      ordered = FALSE),
+
+    # Categorical (non-ordinal) variables
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+
+    # Ensure outcome variable is NUMERIC for DALEX
+    EVT = as.numeric(as.character(EVT))
+    )
+
+```
+
+**Adjust Feature Names**
+
+```{r}
+
+# Readable feature labels
+feature_names <- c(
+  "Gender",
+  "Age",
+  "Systolic Blood Pressure",
+  "Pulse Rate",
+  "Blood Glucose Level",
+  "Body Temperature",
+  "Vigilance Score (4ISS)",
+  "Gaze-Head Deviation Score (4ISS)",
+  "Hemiparesis Score (4ISS)",
+  "Aphasia/Dysarthria (4ISS)",
+  "Anticoagulant Medication",
+  "Time Of Onset (TOO)",
+  "TOO Exclusion Criterion",
+  "Abnormal Pupil Reaction"
+)
+
+names(feature_names) <- c(
+  "gender",
+  "age",
+  "bp_systolic",
+  "pulse",
+  "blood_glucose",
+  "temperature",
+  "vigilance_4ISS",
+  "gaze_head_deviation_4ISS",
+  "hemiparesis_4ISS",
+  "aphasia_dysarthria_4ISS",
+  "medication_anticoags",
+  "TOO",
+  "exclusion_TOO",
+  "pupil_reaction_abnormal"
+)
+
+# select which internal feature names to show
+shown_feats <- names(feature_names)
+
+```
+
+# Permutation-Based Feature Importance
+
+These are so-called Ceteris Paribus plots which is latin and can be translated into: "All else unchanged".\
+It tells us model's prediction changes as you vary one feature's value, while keeping all other feature values fixed at their original, observed values (or other chosen values). 
+
+**Calculation**
+
+```{r}
+
+# number of features to show
+n_feat <- length(shown_feats)
+
+# Helper 1: 1 − ROC-AUC loss
+loss_one_minus_auc <- function(obs, pred) {
+  1 - as.numeric(
+    pROC::roc(
+      response  = obs,
+      predictor = pred,
+      levels    = c("0", "1"),
+      direction = "<"
+    )$auc
+  )
+}
+
+# Helper 2: probability prediction for tidymodels workflows
+prob_predict <- function(model, newdata) {
+  predict(model, new_data = newdata, type = "prob")$.pred_1
+}
+
+# Helper 3: align new_data’s column classes to the workflow prototype
+align_to_proto <- function(new_data, prototype) {
+  for (nm in intersect(names(prototype), names(new_data))) {
+    dst_is_ordered <- inherits(prototype[[nm]], "ordered")
+    dst_is_factor  <- inherits(prototype[[nm]], "factor")
+    dst_class1     <- class(prototype[[nm]])[1]
+    src_class1     <- class(new_data[[nm]])[1]
+
+    if (dst_is_factor && src_class1 != "factor") {
+      new_data[[nm]] <- factor(
+        new_data[[nm]],
+        levels  = levels(prototype[[nm]]),
+        ordered = dst_is_ordered
+      )
+    } else if (dst_class1 == "character" && src_class1 != "character") {
+      new_data[[nm]] <- as.character(new_data[[nm]])
+    } else if (dst_class1 %in% c("numeric", "double", "integer") &&
+               !src_class1 %in% c("numeric", "double", "integer")) {
+      new_data[[nm]] <- as.numeric(new_data[[nm]])
+    }
+  }
+  new_data
+}
+
+# list of final trained/tuned models (omit OneR if undesired)
+models <- list(
+  "Random Forest"  = final_rf_model,
+  "XGBoost"        = final_xgb_model,
+  "OneR/CART"      = final_cart_model,
+  "kNN"            = final_knn_model,
+  "Neural Network" = final_nn_model
+)
+
+# build DALEX explainers for each model
+set.seed(456)
+explainers <- purrr::imap(models, function(mod, lbl) {
+  proto <- mod$pre$mold$blueprint$ptypes$predictors
+  X     <- align_to_proto(dplyr::select(test_data, -EVT), proto)
+  y     <- test_data$EVT
+
+  DALEXtra::explain_tidymodels(
+    model            = mod,
+    data             = X,
+    y                = y,
+    label            = lbl,
+    predict_function = prob_predict,
+    verbose          = FALSE
+  )
+})
+
+# compute raw permutation importances (B = 100)
+fi_raw <- purrr::map_dfr(
+  explainers,
+  ~ DALEX::model_parts(
+      .x,
+      type          = "raw",           # return all B permutations
+      B             = 100,
+      loss_function = loss_one_minus_auc
+    ) %>%
+    dplyr::filter(!variable %in% c("_full_model_", "_baseline_")) %>%
+    dplyr::mutate(model = .x$label),
+  .id = "model_id"
+)
+
+# summarise median & 95% CI for each variable × model
+fi_sum <- fi_raw %>%
+  dplyr::group_by(model, variable) %>%
+  dplyr::summarise(
+    median = median(dropout_loss),
+    q025   = quantile(dropout_loss, 0.025),
+    q975   = quantile(dropout_loss, 0.975),
+    .groups = "drop"
+  )
+
+# optional: average dropout_loss table
+fi_tbl <- fi_raw %>%
+  dplyr::group_by(model, variable) %>%
+  dplyr::summarise(
+    dropout_loss = mean(dropout_loss),
+    .groups      = "drop"
+  )
+
+```
+
+**Plotting**
+
+```{r}
+
+feature_importance_permutation <- ggplot() +
+  # 95% CI lines (will be vertical after coord_flip)
+  geom_errorbar(
+    data = fi_sum %>% filter(variable %in% shown_feats),
+    aes(
+      x      = factor(variable, levels = rev(shown_feats)),
+      ymin   = q025,
+      ymax   = q975,
+      colour = model,
+      group  = model
+    ),
+    position  = position_dodge(width = 0.8),
+    width     = 0.25,
+    linewidth = 0.8
+  ) +
+  # median points
+  geom_point(
+    data = fi_sum %>% filter(variable %in% shown_feats),
+    aes(
+      x      = factor(variable, levels = rev(shown_feats)),
+      y      = median,
+      colour = model
+    ),
+    position = position_dodge(width = 0.8),
+    size     = 1.5,
+    shape    = 19
+  ) +
+  # background grid at 0–70% in 10% steps
+  geom_hline(
+    yintercept = seq(0, 0.7, by = 0.1),
+    colour     = "grey88",
+    linewidth  = 0.3
+  ) +
+  # highlight 60% AUC-reduction threshold
+  geom_hline(
+    yintercept = 0.60,
+    colour     = "grey60",
+    linetype   = "dotted",
+    linewidth  = 0.4
+  ) +
+  # separators between features
+  geom_vline(
+    xintercept = seq(1.5, n_feat - 0.5, by = 1),
+    colour     = "grey40",
+    linewidth  = 0.8
+  ) +
+  # flip axes and disable clipping
+  coord_flip(clip = "off") +
+  # scales and labels
+  scale_x_discrete(labels = feature_names) +
+  scale_y_continuous(
+    limits = c(0, 0.7),
+    breaks = seq(0, 0.7, by = 0.1),
+    labels = percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  # NEJM palette for models
+  scale_colour_nejm(name = "Model") +
+  # axes labels and theme tweaks
+  labs(
+    x = NULL,
+    y = "AUC Reduction without the Feature"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid        = element_blank(),
+    axis.ticks.y      = element_blank(),
+    axis.text.y       = element_text(face = "bold"),
+    legend.position   = "top",
+    legend.title      = element_blank(),
+    legend.key.width  = unit(1.4, "lines"),
+    legend.key.height = unit(0.9, "lines")
+  ) +
+  guides(
+    colour = guide_legend(override.aes = list(size = 4))
+  )
+
+# display the plot
+print(feature_importance_permutation)
+
+```
+
+# SHAP
+
+**Set Parameters**
+
+In this chunk, settings related to computational performance and runtime control are defined.\
+
+These parameters allow for quick code testing and feedback during development. Once the code runs smoothly, the values can be increased for a full analysis to obtain reliable and stable SHAP values.
+
+-   The variable `shap_subset_size` defines the number of observations per model used for SHAP value calculation.
+
+-   The variable `n_shap_iterations` determines the number of permutations per featur**e** used to estimate SHAP contributions.
+
+The smaller these values, the faster the computation
+
+```{r}
+
+# Set Parameters 
+
+shap_subset_size        <- 30          # test rows per model (SHAP)
+n_shap_iterations       <- 30          # permutations per feature
+
+```
+
+## Explainers
+
+DALEX is designed to provide explanations for machine learning models.\
+
+To do this, it creates a standardized object called an **explainer**, which stores the trained model along with its training data and predicted outputs.
+
+Explainers are so called wrappers and wrap around any model, so they are model agnostic and can be used for any predictive model (and many other things).\
+
+The explainer serves as the foundation for all subsequent interpretability calculations, including **SHAP values**, **feature importance**, **prediction breakdowns**, and **model profiles**.\
+
+Confidence intervals for various interpretability metrics can also be computed using explainer.
+
+```{r}
+
+custom_predict_prob <- function(model, newdata) {
+  predict(model, new_data = newdata, type = "prob")$.pred_1
+}
+
+```
+
+```{r}
+
+# 1) OneR Explainer
+
+exp_oneR <- DALEX::explain(
+  model = NULL,  # no actual model object
+  data  = dplyr::select(train_data, -EVT),
+  y     = train_data$EVT,
+  predict_function = final_oneR_model,
+  label = "OneR"
+)
+
+# 2) kNN Explainer
+set.seed(456)
+exp_knn <- explain_tidymodels(
+  final_knn_model,
+  data = select(train_data, -EVT), 
+  y = train_data$EVT,
+  predict_function = custom_predict_prob,
+  label = "kNN",
+  verbose = FALSE
+)
+
+# 3) Neural Network Explainer
+set.seed(456)
+exp_nn <- explain_tidymodels(
+  final_nn_model,
+  data = select(train_data, -EVT),
+  y = train_data$EVT,
+  predict_function = custom_predict_prob,
+  label = "Neural Network",
+  verbose = FALSE
+)
+
+# 4) XGBoost Explainer
+set.seed(456)
+exp_xgb <- explain_tidymodels(
+  final_xgb_model,
+  data = select(train_data, -EVT),
+  y = train_data$EVT,
+  predict_function = custom_predict_prob,
+  label = "XGBoost",
+  verbose = FALSE
+)
+
+# 5) CART Explainer
+set.seed(456)
+exp_cart <- explain_tidymodels(
+  final_cart_model,
+  data = select(train_data_cart, -EVT),
+  y = train_data_cart$EVT,
+  predict_function = custom_predict_prob,
+  label = "OneR/CART",
+  verbose = FALSE
+)
+
+# 6) Random Forest Explainer
+set.seed(456)
+exp_rf <- explain_tidymodels(
+  final_rf_model,
+  data = select(train_data_rf, -EVT),
+  y = train_data_rf$EVT,
+  predict_function = custom_predict_prob, 
+  label = "Random Forest",
+  verbose = FALSE
+)
+
+```
+
+## Calculate SHAP
+
+### Local SHAP Values (Single Observations)
+
+**Create Function**
+
+We need to create a new function. `DALEX::predict_parts` will give us the single value. After we need to do some more data wrangling (2 Steps) to make the function work without errors.
+
+```{r}
+
+# Helper: extracts local, signed SHAP values for multiple observations and returns a tidy, model-tagged tibble
+get_local_shap <- function(explainer, data_src, idx, model_name, B = n_shap_iterations) {
+  purrr::map_dfr(idx, function(i) {
+    # isolate one observation and drop target columns
+    new_obs <- data_src[i, , drop = FALSE] %>% select(-any_of(c("EVT", "EVT_num")))
+
+    # compute SHAP parts with error capture
+    parts <- tryCatch(
+      DALEX::predict_parts(
+        explainer       = explainer,
+        new_observation = new_obs,
+        type            = "shap",
+        B               = B
+      ) %>% as_tibble(),
+      error = function(e) {
+        warning("SHAP failure for ", model_name, " obs ", i, ": ", e$message, call. = FALSE)
+        return(NULL)
+      }
+    )
+    if (is.null(parts)) return(NULL)
+
+# Data Wrangling 1
+    
+# DALEX/ingredients sometimes outputs the feature column as `variable` 
+# and sometimes as `variable_name`. Normalize to `variable_name` so downstream
+# bind_rows(), joins, and faceting don't break. Guard avoids duplicates.
+    if ("variable" %in% names(parts) && !"variable_name" %in% names(parts)) {
+      parts <- parts |> rename(variable_name = variable)
+    }
+
+# Data Wrangling 2
+# `_baseline_` (expected value) and `_full_model_` (final prediction) are meta-rows,
+# NOT per-feature SHAP contributions. Keeping them contaminates feature-level summaries
+# (e.g., mean |SHAP|) and plots. Drop them, then tag rows with the `model` and `obs_id`
+# so that, when combining multiple models' SHAP outputs, provenance is preserved.
+    parts %>%
+      filter(!variable_name %in% c("_baseline_", "_full_model_")) %>%
+      mutate(model = model_name, obs_id = i)
+  })
+}
+
+```
+
+**Calculate the Single SHAP Values**
+
+We use the just created `get_local_shap` function.
+
+Change Before (Test)
+
+**Exclude the label**
+
+SHAP Calculation do not need the label, just the predictions.
+
+```{r}
+
+test_data_SHAP      <- test_data      %>% select(-EVT)
+test_data_cart_SHAP <- test_data_cart %>% select(-EVT)
+test_data_rf_SHAP   <- test_data_rf   %>% select(-EVT)
+
+```
+
+**Calculate SHAP values**
+
+```{r}
+
+# 1) OneR SHAP
+
+set.seed(456)
+idx_oneR <- sample(nrow(test_data_SHAP), min(shap_subset_size, nrow(test_data_SHAP)))
+
+shap_local_oneR <- get_local_shap(exp_oneR, test_data_SHAP, idx_oneR, "OneR")
+
+# 2) CART SHAP 
+
+set.seed(456)
+idx_cart <- sample(nrow(test_data_cart), min(shap_subset_size, nrow(test_data_cart)))
+
+shap_local_cart <- get_local_shap(exp_cart, test_data_cart_SHAP, idx_cart, "CART")
+
+# 3) kNN SHAP 
+
+set.seed(456)
+idx_knn <- sample(nrow(test_data), min(shap_subset_size, nrow(test_data)))
+
+shap_local_knn  <- get_local_shap(exp_knn, test_data_SHAP, idx_knn, "kNN")
+
+# 4) XGBoost SHAP
+
+set.seed(456)
+idx_xgb <- sample(nrow(test_data), min(shap_subset_size, nrow(test_data)))
+
+shap_local_xgb  <- get_local_shap(exp_xgb, test_data_SHAP, idx_xgb, "XGBoost")
+
+
+# 5) Random Forest SHAP
+
+set.seed(456)
+idx_rf <- sample(nrow(test_data_rf), min(shap_subset_size, nrow(test_data_rf)))
+
+shap_local_rf   <- get_local_shap(exp_rf, test_data_rf_SHAP, idx_rf, "Random Forest")
+
+# 6) Neural Network SHAP
+
+set.seed(456)
+idx_nn <- sample(nrow(test_data), min(shap_subset_size, nrow(test_data)))
+
+shap_local_nn   <- get_local_shap(exp_nn, test_data_SHAP, idx_nn, "Neural Network")
+  
+```
+
+### Global SHAP Values
+
+```{r}
+
+# 1) kNN SHAP (global)
+shap_global_knn <- shap_aggregated(
+  exp_knn,
+  new_observations = train_data[idx_knn, ],
+  B = n_shap_iterations
+)$raw %>%
+  as_tibble() %>%
+  filter(!variable_name %in% c("intercept", "prediction")) %>%
+  mutate(model = "kNN")
+
+# 2) Neural Network SHAP (global)
+shap_global_nn <- shap_aggregated(
+  exp_nn,
+  new_observations = train_data[idx_nn, ],
+  B = n_shap_iterations
+)$raw %>%
+  as_tibble() %>%
+  filter(!variable_name %in% c("intercept", "prediction")) %>%
+  mutate(model = "Neural Network")
+
+# 3) XGBoost SHAP (global)
+shap_global_xgb <- shap_aggregated(
+  exp_xgb,
+  new_observations = train_data[idx_xgb, ],
+  B = n_shap_iterations
+)$raw %>%
+  as_tibble() %>%
+  filter(!variable_name %in% c("intercept", "prediction")) %>%
+  mutate(model = "XGBoost")
+
+# 4) CART SHAP (global)
+shap_global_cart <- shap_aggregated(
+  exp_cart,
+  new_observations = test_data_cart[idx_cart, ],
+  B = n_shap_iterations
+)$raw %>%
+  as_tibble() %>%
+  filter(!variable_name %in% c("intercept", "prediction")) %>%
+  mutate(model = "OneR/CART")
+
+# 5) Random Forest SHAP (global)
+shap_global_rf <- shap_aggregated(
+  exp_rf,
+  new_observations = test_data_rf[idx_rf, ],
+  B = n_shap_iterations
+)$raw %>%
+  as_tibble() %>%
+  filter(!variable_name %in% c("intercept", "prediction")) %>%
+  mutate(model = "Random Forest")
+
+
+```
+
+### Preprocess SHAP Values
+
+**Bind SHAP values**
+
+Bring all SHAP values of all five models into one dataframe `shap_all` .
+
+We exclude CART because only hemiparesis is used as a feature, so SHAP distributions aren’t meaningful.
+
+```{r}
+
+# select models
+
+ shap_all <- bind_rows(
+   shap_local_oneR,
+   shap_local_knn,
+   shap_local_nn,
+   shap_local_xgb,
+   shap_local_cart,
+   shap_local_rf)
+
+# select single model (bind_rows does not work)
+
+# shap_all <- shap_local_rf
+
+```
+
+**Remove NA´s**
+
+The SHAP calculation of the Neural Network created sometimes some NA outputs. They will be removed in this code:
+
+```{r}
+
+shap_all <- shap_all %>% na.omit()
+
+```
+
+## Plot SHAP
+
+### Single Global Beeswarm
+
+**Prepare Data**
+
+```{r}
+
+# Prepare SHAP data
+feat_order <- feature_names[shown_feats]
+
+bees_df <- shap_all %>%
+  dplyr::filter(variable_name %in% shown_feats) %>%
+  dplyr::mutate(
+    pretty_lab = factor(
+      feature_names[variable_name],
+      levels = feat_order),
+    value_num = as.numeric(variable_value)
+  ) %>%
+  dplyr::group_by(variable_name) %>%
+  dplyr::mutate(
+    colour_val = if (n_distinct(value_num, na.rm = TRUE) <= 2) {
+      as.numeric(value_num == max(value_num, na.rm = TRUE))
+    } else {
+      scales::rescale(value_num, to = c(0, 1), na.rm = TRUE)
+    }
+  ) %>%
+  dplyr::ungroup()
+
+```
+
+**Plotting**
+
+```{r}
+
+p_bees <- ggplot(bees_df,
+                 aes(
+                   x = contribution,
+                   y = forcats::fct_rev(pretty_lab),
+                   colour = colour_val)) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    colour = "grey70") +
+  geom_hline(
+    yintercept = seq_len(n_distinct(bees_df$pretty_lab)),
+    linetype = "dashed",
+    colour = "grey90",
+    linewidth = 0.25) +
+  ggbeeswarm::geom_quasirandom(
+    size        = 1.1,
+    alpha       = 0.3,
+    width       = 0.2,
+    groupOnX    = FALSE,
+    orientation = "y") +
+  scale_colour_gradientn(
+    colours = c("#2A7FFF", "#7A4DFF", "#B436FF", "#D41159"),
+    limits  = c(0, 1),
+    guide   = "none") +
+  scale_x_continuous(
+    limits = c(-0.4, 0.4),
+    breaks = seq(-0.4, 0.4, by = 0.1)
+  ) +
+  scale_y_discrete(
+    expand = expansion(mult = c(0.05, 0))) +
+  labs(
+    x = "SHAP value (impact on model output)",
+    y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.x        = element_text(
+                           size = 10,
+                           margin = margin(t = 2)), 
+    axis.text.y        = element_text(
+                           size = 10),
+    axis.title.x       = element_text(
+                           size = 12,
+                           margin = margin(t = 12)),
+    legend.text        = element_text(size = 10),
+    legend.title       = element_text(size = 11)
+  )
+
+# Stand-alone horizontal legend
+legend_df <- data.frame(x = 0, y = 0)
+
+p_legend <- ggplot(legend_df, aes(x, y, fill = x)) +
+  geom_tile(alpha = 0) +
+  scale_fill_gradientn(
+    colours = c("#2A7FFF", "#7A4DFF", "#B436FF", "#D41159"),
+    limits  = c(0, 1),
+    breaks  = c(0, 1),
+    labels  = c("Low/Absent", "High/Present"),
+    name    = "Feature value",
+    guide   = guide_colourbar(
+      direction       = "horizontal",
+      barwidth        = unit(0.3, "npc"),
+      barheight       = unit(1, "mm"),
+      title.position  = "top",
+      title.hjust     = 0.5
+    )
+  ) +
+  theme_void() +
+  theme(
+    legend.position   = "top",
+    legend.key.height = unit(2, "mm"),
+    plot.margin       = margin(5, 12, 5, 12),
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 10)
+  ) 
+
+# Combine legend and plot 
+global_beeswarm <- (p_legend / p_bees) +
+  patchwork::plot_layout(heights = c(0.025, 10))
+
+print(global_beeswarm)
+
+```
+
+### Facet Global Beeswarm
+
+**Prepare Data**
+
+```{r}
+
+feat_order <- feature_names[shown_feats]
+
+bees_df <- shap_all %>%
+  filter(variable_name %in% shown_feats) %>%
+  mutate(
+    # Map feature names to pretty labels with fixed order for plotting
+    pretty_lab = factor(feature_names[variable_name], levels = feat_order),
+    # Ensure feature values are numeric for scaling
+    value_num  = as.numeric(variable_value)
+  ) %>%
+  group_by(model, variable_name) %>%
+  mutate(
+    # Normalize feature values to [0, 1] scale for color mapping
+    # Binary variables are converted to 0 or 1 depending on whether they match the maximum value
+    colour_val = if (n_distinct(value_num, na.rm = TRUE) <= 2) {
+      as.numeric(value_num == max(value_num, na.rm = TRUE))
+    } else {
+      rescale(value_num, to = c(0, 1), na.rm = TRUE)
+    }
+  ) %>%
+  ungroup()
+
+```
+
+**Create Colorbar**
+
+```{r}
+
+p_legend <- ggplot(legend_df, aes(x, y, fill = x)) +
+  geom_tile(alpha = 0) +
+  scale_fill_gradientn(
+    colours = c("#2A7FFF", "#7A4DFF", "#B436FF", "#D41159"),
+    limits  = c(0, 1),
+    breaks  = c(0, 1),
+    labels  = c("Low/Absent", "High/Present"),
+    name    = "Feature value",
+    guide   = guide_colourbar(
+      direction      = "horizontal",
+      barwidth       = unit(0.3, "npc"),
+      barheight      = unit(2, "mm"),
+      title.position = "top",
+      title.hjust    = 0.5,
+      ticks          = FALSE
+    )
+  ) +
+  theme_void() +
+  theme(
+    legend.position  = "top",
+    legend.title     = element_text(size = 10, margin = margin(b = 8)), 
+    legend.text      = element_text(size = 10, margin = margin(t = 8)), 
+    legend.spacing.y = unit(8, "pt"),    
+    plot.margin      = margin(0, 0, -8, 0)
+  )
+
+```
+
+**Plotting**
+
+```{r}
+
+bees_df$model <- factor(
+  bees_df$model,
+  levels = c("OneR", "CART", "kNN", "Random Forest", "XGBoost", "Neural Network")
+)
+
+p_bees_facet <- ggplot(
+  bees_df,
+  aes(
+    x      = contribution,
+    y      = pretty_lab,
+    colour = colour_val
+  )
+) +
+  ggbeeswarm::geom_quasirandom(
+    alpha       = 0.6,
+    size        = 0.7,
+    width       = 0.2,
+    groupOnX    = FALSE,
+    orientation = "y"
+  ) +
+  scale_colour_gradientn(
+    colours = c("#2A7FFF", "#7A4DFF", "#B436FF", "#D41159"),
+    limits  = c(0, 1),
+    name    = "Feature value"
+  ) +
+  guides(colour = "none") +
+  labs(x = "SHAP value", y = NULL) +
+  facet_wrap(~ model, ncol = 2) +
+  coord_cartesian(xlim = c(-0.5, 0.5)) +
+  scale_x_continuous(breaks = seq(-0.5, 0.5, 0.2)) +
+  theme_light(base_size = 10) +
+  theme(
+    strip.text    = element_text(face = "bold"),
+    axis.text.y   = element_text(size = 8),
+    axis.title.x  = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(0.3, "lines"),
+    plot.margin   = margin(t = 0, r = 8, b = 4, l = 8)
+  )
+
+bees_facet_plot <- patchwork::wrap_plots(
+  p_legend,
+  p_bees_facet,
+  ncol = 1,
+  heights = c(0.01, 1)
+)
+
+print(bees_facet_plot)
+
+```
+
+### (\|SHAP value\|) Global Feature Importance
+
+**Prepare Data**
+
+```{r}
+
+# 1) Summarise SHAP values
+shap_summary <- shap_all %>%                         
+  group_by(variable_name) %>% 
+  summarise(mean_abs_shap = mean(abs(contribution)),
+            .groups = "drop") %>% 
+  arrange(desc(mean_abs_shap))
+
+# 2) Select top N features
+top_n          <- 9
+total_features <- nrow(shap_summary)
+
+if (total_features > top_n) {
+  top_features_df   <- slice_head(shap_summary, n = top_n)
+  other_features_df <- slice_tail(shap_summary,
+                                  n = total_features - top_n)
+  
+  plot_df <- bind_rows(
+    top_features_df,
+    tibble(
+      variable_name = "other_features_sum",
+      mean_abs_shap = sum(other_features_df$mean_abs_shap)
+    )
+  )
+  
+  feature_labels <- c(feature_names,
+                      other_features_sum = "Sum of remaining features")
+} else {
+  plot_df        <- shap_summary
+  feature_labels <- feature_names
+}
+
+# 3) Preserve order
+plot_df$variable_name <- factor(plot_df$variable_name,
+                                levels = rev(plot_df$variable_name))
+
+```
+
+**Plotting**
+
+```{r}
+
+# 4) Plot
+shap_bar_plot <- ggplot(plot_df,
+                        aes(x = mean_abs_shap, y = variable_name)) +
+  geom_col(fill = "#ff0052", width = 0.50) +
+  geom_text(aes(label = sprintf("+%.2f", mean_abs_shap)),
+            hjust = -0.15, size = 3.3, colour = "#ff0052") +
+  scale_x_continuous(expand = expansion(mult = c(0.01, 0.18))) +
+  scale_y_discrete(labels = feature_labels) +
+  labs(x = "mean(| SHAP value |)", y = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    panel.grid.major.y  = element_line(colour = "grey90", linetype = "dotted"),
+    axis.line.x.bottom  = element_line(colour = "grey35", linewidth = .4),
+    axis.line.y.left    = element_line(colour = "grey35", linewidth = .4),
+    axis.ticks.y        = element_blank(),
+    axis.ticks.x        = element_line(colour = "grey80"),
+    axis.ticks.length.x = unit(0.15, "cm"),
+    axis.text.y         = element_text(size = 9),
+    axis.title.x        = element_text(margin = margin(t = 3, unit = "pt"),
+                                       size = 9)
+  )
+
+print(shap_bar_plot)
+
+```

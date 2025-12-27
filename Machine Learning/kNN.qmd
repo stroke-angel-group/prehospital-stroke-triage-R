@@ -1,0 +1,1474 @@
+---
+title: "k-Nearest Neighbors (k-NN)"
+abstract: "This document shows the process of training kNN models for preclinical stroke triage. It covers data preprocessing steps, including handling missing values via bagged tree imputation and scaling, followed by hyperparameter tuning using Racing Methods and, alternatively, grid search. The document compares the performance of the tuned Random Forest model against a fixed hyperparameter model and the 4-Item Stroke Scale (4I-SS) on a held-out test set. Evaluation metrics, including ROC and PR curves, along with confusion matrices and confidence intervals obtained through bootstrapping, are presented to assess model efficacy."
+editor: visual
+---
+
+## Load Packages
+
+```{r}
+
+# Handle conflicts of functions
+library(conflicted)
+
+# Enable parallel processing
+library(future)     
+library(doFuture)   
+library(foreach)    
+library(parallelly)
+
+# Project-relative paths & file management
+library(here)
+
+# Tidyverse and ML
+library(tidyverse)
+library(tidymodels)
+library(caret)
+
+# allows tuning without a specified grid and Bradley-Terry-Modell and Mess-ANOVA
+library(finetune)
+
+# Preprocessing
+library(themis) # Oversampling
+
+# kNN
+library(kknn) 
+
+# Evaluation
+library(yardstick) 
+library(PRROC) # calculate both the ROCAUC and PRAUC
+library(pROC)  # plot and compaire the ROC Curves
+
+# combined plots
+library(gridExtra)
+
+# Sankey
+library(ggalluvial)
+
+```
+
+```{r}
+
+stroke_triage_data <- read_csv(here("Code",
+                                    "Data Preprocessing",
+                                    "data_manipulation_6_SFS",
+                                    "data_manipulation_6_SFS.csv"))
+
+```
+
+# Preprocessing
+
+## Scale Numerical Data
+
+Scaling aims to bring all numerical data onto a comparable scale. In machine learning, the actual numerical values themselves often hold little importance compared to their relationships to eachother. For example, if one variable represents a high age of 100 and another variable represents a laboratory blood measure in milligrams of a substance, both may indicate high values, but some algorithms struggle to interpret this due to the differing scales. Moreover, scaling is important for comparing variances, as it ensures that the variables are on a uniform scale. Also the imputation process could be improved due to a scaling because it uses\
+algorthm as well.
+
+A publication by Ozsahin et al. (2022) illustrates the impact of scaling methods on machine learning applications for the classification of diabetes mellitus. This study uses features like age, blood pressure, BMI, and glucose level, which seem to be comparable to the feature characteristics of this study. In the mentioned study, normalization slightly outperformed standardization methods. Additionally, standardization typically prefers a normal distribution, which does not hold for all numerical variables. Considering these aspects, the MinMax Scaler will be used in this study. A separate, rescaled dataframe will be created for the training of tree-based algorithms to enhance performance and interpretability.
+
+## Set Data Types
+
+Set data types for for robust imputation and modeling.
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>% 
+  mutate(
+    EVT = factor(EVT, levels = c("1", "0")),
+
+    # Ordinale Prädiktoren
+    vigilance_4ISS           = factor(vigilance_4ISS,
+                                      levels = c(0,1,2),
+                                      ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                      levels = c(0,1,2),
+                                      ordered = TRUE),
+    hemiparesis_4ISS         = factor(hemiparesis_4ISS,
+                                      levels = c(0,1,2),
+                                      ordered = TRUE),
+
+    # nominale Prädiktoren
+    aphasia_dysarthria_4ISS  = factor(aphasia_dysarthria_4ISS),
+    gender                   = factor(gender),
+    medication_anticoags     = factor(medication_anticoags),
+    exclusion_TOO            = factor(exclusion_TOO),
+    pupil_reaction_abnormal  = factor(pupil_reaction_abnormal)
+  )
+
+```
+
+## Train-Test Data Split
+
+```{r}
+
+# Set seed for reproducible and comparable Train-Test splits
+set.seed(456)
+
+# Split the dataset into training and testing sets
+stroke_trage_data_split <- initial_split(stroke_triage_data,
+                                         prop = 0.8,
+                                         strata = EVT) 
+
+
+# create seperate dataframes
+train_data <- stroke_trage_data_split %>% training()
+test_data <- stroke_trage_data_split %>% testing()
+
+stroke_trage_data_split
+
+```
+
+## Imputation
+
+**Apply Bagged Tree Imputation**
+
+We analyzed the `data_manipulation_5_imputation.qmd` file and found that `step_impute_bag()` provides the most suitable imputation method for our dataset.
+
+Each feature with missing values is treated as the **target (label)**, while all other available features act as **predictors**. Multiple decision trees (like in Random Forest, but each tree uses all predictors) are trained on different random subsets of the data. The missing values are then predicted using these models, and this process is repeated separately for each variable with missing data.
+
+```{r}
+
+# Define the recipe for imputation using bagged trees
+imputation_recipe <- recipe(EVT ~ ., data = train_data) %>%
+  step_impute_bag(all_predictors())  
+
+# Train the recipe using only the training data
+trained_imputation_recipe <- imputation_recipe %>%
+  prep(training = train_data, retain = TRUE)  
+
+# Apply the trained recipe separately to training and test data
+train_data <- bake(trained_imputation_recipe, new_data = train_data)  
+test_data  <- bake(trained_imputation_recipe, new_data = test_data)  
+
+```
+
+Convert all Factors to Numeric
+
+```{r}
+#| warning: false
+
+train_data <- train_data %>%
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))))  # Convert factors to numeric
+
+test_data <- test_data %>%
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))))  # Convert factors to numeric
+
+```
+
+## 4I-SS Reference
+
+**Calculate the 4I-SS**
+
+The sum of the four individual items of the 4I-SS is calculated after imputation, ensuring that a score is obtained for each observation. As imputation was performed separately for the training and test datasets to avoid data leakage, the 4I-SS is also calculated separately for each dataset.
+
+```{r}
+
+# Calculate 4I-SS for train data
+train_data <- train_data %>%
+  mutate(sum_4ISS = vigilance_4ISS +
+                         gaze_head_deviation_4ISS +
+                         hemiparesis_4ISS +
+                         aphasia_dysarthria_4ISS)
+
+# Calculate 4I-SS for test data
+test_data <- test_data %>%
+  mutate(sum_4ISS = vigilance_4ISS +
+                         gaze_head_deviation_4ISS +
+                         hemiparesis_4ISS +
+                         aphasia_dysarthria_4ISS)
+
+```
+
+**Calculate 4I-SS EVT Decisions**
+
+The ML model should outperform the 4-Item Stroke Scale (4I-SS). Therefore, the decisions made by the 4I-SS on the same test set need to be calculated and saved in a separate dataframe for comparison.
+
+```{r}
+
+classification_4ISS <- test_data %>% 
+  mutate(classification_EVT = if_else(sum_4ISS > 2, 1, 0)) %>% 
+  select(sum_4ISS, classification_EVT)
+
+```
+
+## Select Features Manually
+
+**Get Current Features**
+
+```{r}
+
+colnames(stroke_triage_data)
+
+```
+
+**Select 14 Features from Feature Selection**
+
+Optionally, the aggregated 4I-SS score can be used in place of the four individual items. Either the variables vigilance_4ISS, gaze_head_deviation_4ISS, hemiparesis_4ISS, and aphasia_dysarthria_4ISS or the total score fourISS_score should be commented out accordingly to avoid redundant information and multicollinearity.
+
+```{r}
+
+# for train data
+train_data <- train_data %>% 
+  select(gender,
+         age,
+         bp_systolic,
+         pulse,
+         blood_glucose,
+         temperature,
+         vigilance_4ISS,
+         gaze_head_deviation_4ISS,
+         hemiparesis_4ISS,
+         aphasia_dysarthria_4ISS,
+#         sum_4ISS,
+         medication_anticoags,
+         TOO,
+         exclusion_TOO,
+         pupil_reaction_abnormal,
+         EVT)
+
+
+# for test data
+test_data <- test_data %>% 
+  select(gender,
+         age,
+         bp_systolic,
+         pulse,
+         blood_glucose,
+         temperature,
+         vigilance_4ISS,
+         gaze_head_deviation_4ISS,
+         hemiparesis_4ISS,
+         aphasia_dysarthria_4ISS,
+#         sum_4ISS,
+         medication_anticoags,
+         TOO,
+         exclusion_TOO,
+         pupil_reaction_abnormal,
+         EVT)
+
+```
+
+Check the proportion of the label in training and test data to ensure they are close to each other (The proportion is equal for scaled and unscaled data).
+
+```{r}
+
+label_proportion_train <- table(train_data$EVT)
+
+label_proportion_test <- table(test_data$EVT)
+
+# Absolute Distribution
+print(label_proportion_train)
+print(label_proportion_test)
+
+# Proportions
+print(round(prop.table(label_proportion_train), digits = 2))
+print(round(prop.table(label_proportion_test), digits = 2))
+
+```
+
+**Set EVT to a Factor**
+
+```{r}
+
+# train data
+train_data$EVT <- factor(train_data$EVT,
+                         levels = c("1", "0"))
+
+# test data
+test_data$EVT <- factor(test_data$EVT,
+                        levels = c("1", "0"))
+
+# 4I-SS data
+classification_4ISS$classification_EVT  <- factor(classification_4ISS$classification_EVT,
+                                                  levels = c("1", "0"))
+
+```
+
+## Cross Validation
+
+**Train multipe Models (with Cross Validation) and find the best Hyperparameter-Set with Grid Search**
+
+The validation data for each fold will comprise 1/k of the cases, where k is typically 5 or 10. However, due to the imbalanced nature of our dataset, we will avoid using 10 folds. With k = 10, the number of EVT cases in each fold could become too small, leading to unreliable metric estimations.
+
+The k = 5 procedure will be repeated twice (repeats = 2) to obtain 10 estimated values for each hyperparameter combination.
+
+**Set up the folds**
+
+```{r, warning=FALSE}
+
+set.seed(456)
+cv_folds <- vfold_cv(train_data,
+# training set will be 1/5 of data
+                     v = 5, 
+# we repaet it twice to gain 10 estimations per combination
+                     repeats = 5,
+# ensures that EVT prevalence is similar in each fold
+                     strata = EVT,
+# without this setting, strata does not work for variables with low prevalences
+                     pool   = 0.05)      
+
+```
+
+**EVT´s per fold**
+
+EVT occurance should be sufficient for valid calculations.
+
+-   Dataset: 77 (100%)
+
+-   Trainingsset: 55 (80%)
+
+-   Testset: 22 (20%)
+
+```{r}
+
+# Count EVT cases in each fold
+fold_counts <- map(cv_folds$splits, ~{
+  analysis_data <- analysis(.x)  # Training data in this fold
+  assessment_data <- assessment(.x)  # Test data in this fold
+  tibble(
+    fold_id = .x$id,
+    # Number of EVT cases in the training set
+    train_evt_count = sum(analysis_data$EVT == "1"),  
+    # Number of EVT cases in the test set
+    test_evt_count = sum(assessment_data$EVT == "1")  
+  )
+})
+
+# Combine results into a single data frame
+fold_counts_df <- bind_rows(fold_counts)
+
+# Calculate descriptive statistics for test_evt_count
+test_evt_stats <- fold_counts_df %>%
+  summarise(
+    min_test_evt_count = min(test_evt_count),
+    max_test_evt_count = max(test_evt_count),
+    median_test_evt_count = median(test_evt_count)
+  )
+
+# Display fold-specific counts and overall statistics
+print(fold_counts_df)
+print(test_evt_stats)
+
+
+```
+
+**Distribution of the EVT Cases**
+
+```{r}
+
+# Plot the distribution of test_evt_count
+ggplot(fold_counts_df, aes(x = test_evt_count)) +
+  geom_histogram(binwidth = 1, color = "black", fill = "darkgrey") +
+  scale_x_continuous(
+    breaks = seq(min(fold_counts_df$test_evt_count),
+                 max(fold_counts_df$test_evt_count), by = 1)
+  ) +
+  labs(
+    title = "",
+    x = "Number of EVT Cases in Validation Fold",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+```
+
+\newpage
+
+# kNN
+
+## Preprocessing (Recipe)
+
+**Set Preprocessing (in tidymodels: "Recipe")**
+
+Examples Sampling
+
+-   Oversampling: c(0.3, 0.5)) -\> Minority class = 30%-50% of majority
+
+-   Downsampling: c(1.0, 2.0)) -\> Majority class = 1x-2x of minority
+
+```{r}
+
+recipe <- recipe(EVT ~ ., data = train_data) %>% 
+  step_smotenc(
+    EVT,                     
+    over_ratio = tune(), # Oversampling SMOTE
+    neighbors  = 5,
+    skip       = TRUE
+  ) %>% 
+  step_downsample(       # Downsampling
+    EVT,
+    under_ratio = tune(),
+    skip = TRUE
+  ) %>% 
+  step_range(
+    all_numeric_predictors(),
+    min = 0,
+    max = 1
+  ) 
+
+```
+
+## Create Model (Tuning and Fixed Hyperparameter)
+
+In this step, we can choose between two options by commenting out the other: either to run the script with hyperparameter tuning or to use a model with a fixed set of hyperparameters.\
+
+Using fixed hyperparameters is useful for tasks like evaluating performance in a nested cross-validation setup, or for faster re-evaluation after minor data changes, without the computational cost of hyperparameter tuning.
+
+**Option 1: For Tuning**
+
+```{r}
+
+# Define the KNN model
+knn_spec <- nearest_neighbor(
+  neighbors = tune(),
+  mode = "classification"
+) %>%
+  set_engine("kknn")
+
+```
+
+**Option 2: Best Model with Fixed Hyperparameters**
+
+```{r}
+
+# knn_spec <- nearest_neighbor(
+#   neighbors = 15,
+#   mode = "classification"
+# ) %>%
+#   set_engine("kknn")
+
+```
+
+## Pipeline
+
+**Create a Pipeline (in tidymodels: "Workflow")**
+
+```{r}
+  
+# Create a workflow that combines the recipe and model
+knn_workflow <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(knn_spec)
+
+```
+
+## Performance Metrics
+
+Only one metric will be used for hyperparameter optimization, while the others provide valuable insights into hyperparameter behavior. However, not all metrics will be calculated for every hyperparameter combination, as this would be computationally intensive.
+
+```{r}
+
+metrics_tune_grid <- yardstick::metric_set(
+  yardstick::roc_auc,
+  yardstick::pr_auc,
+  yardstick::sensitivity,
+  yardstick::specificity
+)
+
+```
+
+## Parameter Grid
+
+**Option 1: Define the Parameter-Grid for** `tune_race_anova`
+
+size = total number of searches combinations
+
+```{r}
+
+knn_parameter_set <- parameters(
+  neighbors(range = c(5L, 25L)),
+  over_ratio(range = c(0.2, 0.5)),
+  under_ratio(range = c(0.8, 1.2))
+)
+
+# Create a grid for Race ANOVA
+knn_parameter_grid_race <- grid_space_filling(knn_parameter_set,
+                                                  size = 50)
+
+```
+
+**Option 2: Define the Parameter-Grid for** `tune_grid`
+
+```{r}
+
+knn_parameter_set <- parameters(
+  neighbors(range = c(5L, 25L)),
+  over_ratio(range = c(0.2, 0.5)),
+  under_ratio(range = c(0.8, 1.2))
+)
+
+# Create the regular grid
+knn_parameter_grid_search <- grid_regular(knn_parameter_set,
+                                          # Total Number of Searches Combinations
+                                          # = Levels x Hyperparameters
+                                         levels = 5)
+
+```
+
+## Grid Search
+
+**Option 1: Racing Methods (`tune_race_anova()`)**
+
+-   **Computation Cost**: Low
+-   **Parallelizability**: High—each round’s remaining candidates can be evaluated in parallel
+-   **Pros**
+    -   Eliminates poor settings early, minimizing wasted computation
+    -   Effective coverage of a large search space without fully evaluating every combination
+-   **Cons**
+    -   Requires carefully tuned stopping rules (e.g., significance thresholds) to avoid dropping good candidates
+    -   Relies on ANOVA assumptions, which may break down with very small resample subsets
+
+------------------------------------------------------------------------
+
+**Option 2: Grid Search (`tune_grid()`)**
+
+-   **Computation Cost**: High
+-   **Parallelizability**: Very high—each grid point is independent and can be evaluated in parallel
+-   **Pros**
+    -   Guarantees that every point in the predefined grid is assessed
+    -   Simple to implement and scale out across multiple workers
+-   **Cons**
+    -   Wastes time on combinations that are unlikely to perform well
+    -   Becomes impractical for high-dimensional parameter spaces or finely spaced grids
+
+------------------------------------------------------------------------
+
+| Method              | Exploration | Computation Cost |
+|---------------------|-------------|------------------|
+| `tune_grid()`       | fixed       | high             |
+| `tune_race_anova()` | optimized   | low              |
+
+```{r}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Option 1: Racing Methods
+# ──────────────────────────────────────────────────────────────────────────────
+
+knn_tune_results <- tune_race_anova(
+  knn_workflow,
+  resamples = cv_folds,                
+  grid      = knn_parameter_grid_race,                
+  metrics   = metrics_tune_grid,        
+  control   = control_race(
+    burn_in = 4,
+    alpha   = 0.01,
+    save_pred    = TRUE,              
+    verbose_elim = TRUE,                
+    parallel_over = "resamples"  # setting for parallelization 
+  )
+)
+
+```
+
+```{r}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Option 2: Full Grid Search
+# ──────────────────────────────────────────────────────────────────────────────
+
+# knn_tune_results <- tune_grid(
+#     knn_workflow,                          
+#     resamples = cv_folds,                
+#     grid      = knn_parameter_grid_search, 
+#     metrics   = metrics_tune_grid)           
+
+```
+
+## **Analyse Hyperparameter Combinations**
+
+**Results of the Grid Search**
+
+The Results are in **`.metrics`** are k \* repeats tibbles. Each of them show the **`.estimate`** of each possible Hyperparameter combination and for each choosen metric.
+
+Length of each tibble: Hyperparameter \* k (Folds) \* Number of Metrics
+
+Here: 5 (Oversampling Ratios) \* 2 Distance Metrics \* 3 Weight functions \* 10 Neigbors \* 3 Metrics = 1200
+
+```{r}
+
+# knn_tune_results$.metrics
+
+```
+
+**Show best results based on a selected peknnormance metric**
+
+Shows the 5 best Hyperparamermeter Settings and the `metric` of interest. It shows the `mean` of all calculated values for each Hyperparameter combination n (k \* repeats).
+
+1.  **AUCROC**
+
+```{r}
+
+show_best(knn_tune_results,
+          metric = "roc_auc"
+          )
+
+```
+
+2.  **PRAUC**
+
+```{r}
+
+show_best(knn_tune_results,
+          metric = "pr_auc"
+          )
+
+```
+
+3.  **Sensitivity**
+
+```{r}
+
+show_best(knn_tune_results,
+          metric = "sensitivity"
+          )
+
+
+```
+
+3.  **Specificity**
+
+```{r}
+
+show_best(knn_tune_results,
+          metric = "specificity"
+          )
+
+```
+
+**Select optimal Hyperparameter-Set based on a peknnormance metrics**
+
+`select_best()` picks the model with the highest average performance based solely on the chosen metric.
+
+```{r}
+
+# Select the best model based on a chosen metric (e.g., recall)
+
+best_knn <- select_best(knn_tune_results,
+                       metric = "roc_auc")
+
+print(best_knn)
+
+```
+
+# Visual Hyperparameter Evaluation
+
+## Univariate
+
+The plots visualize how different hyperparameter settings impact model performance. The central point on each line shows the *mean* performance metric (e.g., AUCROC) across cross-validation (CV) folds. The vertical bars ("whiskers") extend from the *minimum* to the *maximum* metric value observed across those CV folds.
+
+```{r}
+
+# 1. Define the custom color palette
+custom_colors <- c(
+  "AUCPR"       = "#855C75FF",
+  "AUCROC"      = "#D9AF6BFF",
+  "Sensitivity" = "#AF6458FF",
+  "Specificity" = "#736F4CFF"
+)
+
+# 2. Collect raw metrics from your tuning object
+all_fold_metrics <- collect_metrics(knn_tune_results, summarize = FALSE)
+
+# 3. Prepare the data
+prepared_data <- all_fold_metrics %>%
+  mutate(
+    Metric_Label = dplyr::recode(.metric,
+      "pr_auc"      = "AUCPR",
+      "roc_auc"     = "AUCROC",
+      "sensitivity" = "Sensitivity",
+      "specificity" = "Specificity"
+    )
+  ) %>%
+  filter(.metric %in% c("pr_auc", "roc_auc", "sensitivity", "specificity")) %>%
+  mutate(
+    Metric_Label = factor(Metric_Label, levels = names(custom_colors))
+  )
+
+# 4. Helper function
+plot_hyperparam <- function(data, param, label) {
+  summary_df <- data %>%
+    group_by(!!sym(param), Metric_Label) %>%
+    summarise(
+      mean_estimate = mean(.estimate, na.rm = TRUE),
+      min_estimate  = min(.estimate, na.rm = TRUE),
+      max_estimate  = max(.estimate, na.rm = TRUE),
+      .groups       = "drop"
+    ) %>%
+    mutate(min_estimate = pmin(min_estimate, max_estimate))
+
+  ggplot(summary_df, aes(x = !!sym(param), y = mean_estimate, color = Metric_Label)) +
+    geom_errorbar(aes(ymin = min_estimate, ymax = max_estimate),
+                  width = diff(range(summary_df[[param]], na.rm = TRUE)) /
+                          (n_distinct(summary_df[[param]]) * 5),
+                  alpha = 0.5, linewidth = 0.8) +
+    geom_line(linewidth = 0.7, alpha = 0.6) +
+    geom_point(size = 2.5) +
+    facet_wrap(~ Metric_Label, scales = "fixed", ncol = 2) +
+    coord_cartesian(ylim = c(0, 1)) +
+    labs(
+      x     = label,
+      y     = "Metric Value (Mean with Min/Max Range)",
+      title = paste("Hyperparameter:", label)
+    ) +
+    scale_color_manual(values = custom_colors) +
+    theme_bw(base_size = 11) +
+    theme(
+      legend.position  = "none",
+      strip.background = element_rect(fill = "gray90"),
+      strip.text       = element_text(face = "bold", size = 9),
+      plot.title       = element_text(hjust = 0.5, size = 12, face = "bold"),
+      axis.title       = element_text(size = 10)
+    )
+}
+
+```
+
+**Downsampling Ratio (`under_ratio`)**
+
+```{r}
+
+if ("under_ratio" %in% names(prepared_data)) {
+  print(plot_hyperparam(prepared_data,
+                        param = "under_ratio",
+                        label = "Downsampling Ratio (under_ratio)"))
+}
+
+```
+
+**SMOTE Oversampling Ratio (`over_ratio`)**
+
+```{r}
+
+if ("over_ratio" %in% names(prepared_data)) {
+  print(plot_hyperparam(prepared_data,
+                        param = "over_ratio",
+                        label = "SMOTE Oversampling Ratio (over_ratio)"))
+}
+
+```
+
+**Number of Neighbors (`neighbors`)**
+
+```{r}
+
+if ("neighbors" %in% names(prepared_data)) {
+  print(plot_hyperparam(prepared_data,
+                        param = "neighbors",
+                        label = "Number of Nearest Neighbors (k)"))
+}
+
+```
+
+## Multivariate
+
+**Heatmap Over- and Undersampling Combinations**
+
+This heat-map identifies the over- and undersampling combinations that yield the highest values for each metric, providing a more practical assessment than the univariate hyper-parameter plots above.
+
+```{r}
+  
+# ───────────────────────────────────────────────────────────────
+# 1.  Summarise fold-level metrics
+# ───────────────────────────────────────────────────────────────
+heat_df <- knn_tune_results %>% 
+  collect_metrics(summarize = FALSE) %>% 
+  filter(.metric %in% c("pr_auc", "roc_auc", "sensitivity", "specificity")) %>% 
+  group_by(over_ratio, under_ratio, .metric) %>% 
+  summarise(mean_val = mean(.estimate, na.rm = TRUE), .groups = "drop") %>% 
+  mutate(metric_label = dplyr::recode(as.character(.metric),
+                                      pr_auc      = "AUCPR",
+                                      roc_auc     = "AUCROC",
+                                      sensitivity = "Sensitivity",
+                                      specificity = "Specificity"))
+
+# custom high colours
+custom_colors <- c(
+  "AUCPR"       = "#855C75FF",
+  "AUCROC"      = "#D9AF6BFF",
+  "Sensitivity" = "#AF6458FF",
+  "Specificity" = "#736F4CFF"
+)
+
+# ───────────────────────────────────────────────────────────────
+# 2.  Helper for a single metric heat-map
+# ───────────────────────────────────────────────────────────────
+plot_one_metric <- function(metric_name) {
+
+  ggplot(heat_df %>% filter(metric_label == metric_name),
+         aes(over_ratio, under_ratio, fill = mean_val)) +
+    geom_tile() +
+    geom_text(aes(label = sprintf("%.1f", mean_val)),   # tile label: 1 dec
+              colour = "white", size = 3) +
+    scale_fill_gradient(
+      low    = "white",
+      high   = custom_colors[[metric_name]],
+      labels = scales::label_number(accuracy = 0.1)     # legend: 1 dec
+    ) +
+    labs(title = metric_name,
+         x = "Oversampling Ratio",  y = "Downsampling Ratio",
+         fill = "Mean Value") +
+    theme_minimal(base_family = "sans") +
+    theme(plot.title = element_text(face = "bold", hjust = .5))
+}
+
+# ───────────────────────────────────────────────────────────────
+# 3.  Build the four panels & show only the combined plot
+# ───────────────────────────────────────────────────────────────
+
+combined_plot <- grid.arrange(
+  plot_one_metric("AUCPR"),      plot_one_metric("AUCROC"),
+  plot_one_metric("Sensitivity"),plot_one_metric("Specificity"),
+  ncol = 2
+)
+
+```
+
+**Manual Three-Hyperparameter Visualization Plot**
+
+This code generates a plot to compare three specific hyperparameters, similar to `tune::autoplot()`. It addresses the issue of `autoplot()` becoming messy by allowing manual selection, thus providing a cleaner visual representation of the chosen parameter interactions.\
+
+**Get the available Hyperparameters to choose from:**
+
+```{r}
+
+# tune::collect_metrics creates a tidy table from the tune() output
+
+knn_metrics <- tune::collect_metrics(knn_tune_results)
+
+knn_hyperparams <- knn_metrics %>% 
+  select(-.metric, -.estimator, -mean, -n, -std_err, -.config)
+
+# Plot all available Hyperparameters
+print(colnames(knn_hyperparams)) 
+
+```
+
+**Select three Hyperparameters and the metric for plotting**
+
+```{r}
+# ──────────────────────────────────────────────────────────────────────────────
+# Select three Hyperparameters and the metric for plotting
+# ──────────────────────────────────────────────────────────────────────────────
+
+hyperparameter_1 <- "neighbors"   
+hyperparameter_2 <- "under_ratio"   
+hyperparameter_3 <- "over_ratio"    
+
+# Select one metric (roc_auc, pr_auc, sensitivity, specificity)
+metric_to_plot <- "pr_auc"     
+
+```
+
+**Plot and Compare tree Hyperparameters**
+
+```{r}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Plot and comparethe tree Hyperparameters
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Step 1: Prepare data for three hyperparameters
+pr_auc_subset_3_params <- knn_metrics %>%
+  dplyr::filter(.metric == metric_to_plot) %>%
+  # Select the three chosen hyperparameters and the mean metric value
+  dplyr::select(dplyr::all_of(c(hyperparameter_1,
+                                hyperparameter_2,
+                                hyperparameter_3)), mean) %>%
+  dplyr::mutate(
+    !!rlang::sym(hyperparameter_2) := factor(.data[[hyperparameter_2]]),
+    !!rlang::sym(hyperparameter_3) := factor(.data[[hyperparameter_3]])
+  )
+
+# Step 3: Create plot for three parameters
+plot_3_params <- ggplot2::ggplot(pr_auc_subset_3_params,
+                                  ggplot2::aes(x = .data[[hyperparameter_1]],
+                                               y = mean,
+                                               color = .data[[hyperparameter_2]],
+                                               group = .data[[hyperparameter_2]])) +
+  ggplot2::geom_line(alpha = 0.8, linewidth = 0.8) +
+  ggplot2::geom_point(size = 1.2) +
+  # Facet by the third hyperparameter
+  ggplot2::facet_wrap(ggplot2::vars(.data[[hyperparameter_3]]),
+                      labeller = ggplot2::label_both) +
+  ggplot2::labs(x = hyperparameter_1,
+                y = paste("Mean", toupper(metric_to_plot)),
+                color = hyperparameter_2) +
+  ggplot2::theme_light(base_family = "sans") # As per user preference
+
+print(plot_3_params)
+
+```
+
+# Train
+
+**Extact the best Hyperparameter-Set an save it in a Workflow**
+
+```{r}
+
+# Finalize the workflow with the best parameters
+
+knn_hyperparameter_workflow <- finalize_workflow(knn_workflow, best_knn)
+knn_hyperparameter_workflow
+
+```
+
+**Train Best Model for Hyperparameter Tuning**
+
+This code chunk is designed to train the Random Forest model using the best hyperparameters identified during hyperparameter optimization.
+
+```{r}
+
+# Fit the final model on the entire training data
+
+final_knn_fit <- fit(knn_hyperparameter_workflow, data = train_data)
+final_knn_fit
+
+```
+
+**Train Best Fixed Model**
+
+This code chunk is designed to train the Random Forest model using pre-defined hyperparameters that were manually fixed based on prior analysis and evaluation.
+
+```{r}
+
+# final_knn_fit <- fit(knn_workflow, data = train_data)
+# 
+# final_knn_fit
+
+```
+
+\newpage
+
+# Predictions
+
+**Data Preprocessing for Prediction**
+
+Unlike mathematically-centered approaches such as Nearest Neighbor and Neural Networks, tree and rule-based algorithms work differently and can handle categorical and factorial data effectively. Properly setting the classes helps interpret the Decision trees later, as boolean features won't be split between 0 and 1.
+
+The ordinal 4I-SS features will be left as numerical because standard factors do not represent the order, and "ordered factors" in R are not interpreted by the ranger package but in CART.
+
+## On Train Data
+
+**Plot Sensitivity/Specificity Trade off**
+
+```{r, warning=FALSE}
+
+# 1. Predicted probabilities + true labels (Test)
+test_probs <- predict(final_knn_fit, new_data = test_data, type = "prob") %>%
+  bind_cols(test_data %>% select(EVT)) %>%
+  mutate(EVT = factor(EVT, levels = c("0","1")))  # "1" = positiv
+
+# 2. Grid der Thresholds
+thresholds <- seq(0, 1, by = 0.01)
+
+# 3. Sensitivität & Spezifität pro Threshold
+metrics_grid <- map_dfr(thresholds, function(thr) {
+  preds <- if_else(test_probs$.pred_1 >= thr, "1", "0") %>%
+    factor(levels = c("0","1"))
+  truth <- test_probs$EVT
+
+  tibble(
+    threshold   = thr,
+    sensitivity = sensitivity_vec(truth, preds, event_level = "second"),
+    specificity = specificity_vec(truth, preds, event_level = "second")
+  )
+})
+
+# 4. Plot
+ggplot(metrics_grid, aes(x = threshold)) +
+  geom_line(aes(y = sensitivity, color = "Sensitivity"), linewidth = 1) +
+  geom_line(aes(y = specificity, color = "Specificity"), linewidth = 1) +
+  scale_color_manual(values = c("Sensitivity" = "#E18727E6",
+                                "Specificity" = "#6F99ADE6")) +
+  coord_cartesian(xlim = c(0,1), ylim = c(0,1)) +
+  labs(
+    x     = "Probability Threshold",
+    y     = "Metric Value",
+    title = "Test | Sensitivity & Specificity Tradeoff",
+    color = NULL
+  ) +
+  theme_minimal()
+
+```
+
+Predict classes for the training data using a **custom threshold** to compare with the test data and assess overfitting.
+
+```{r, warning=FALSE}
+
+# Define a custom threshold
+custom_threshold <- 0.5  # The lower the threshold, the more likely the model will predict a positive class ("1")
+
+# Make predictions with probabilities for the training data
+knn_predictions_train <- predict(final_knn_fit,
+                                 new_data = train_data,
+                                 type = "prob") %>%
+  mutate(
+    pred_class = if_else(.pred_1 >= custom_threshold, "1", "0"), # Apply custom threshold
+    pred_class = factor(pred_class, levels = c("1", "0"))        # Ensure pred_class is a factor
+  ) %>%
+  select(-contains("EVT")) %>%                                   # Remove any duplicate EVT columns
+  bind_cols(train_data %>% select(EVT)) %>%                     # Bind the actual EVT column
+  mutate(EVT = factor(EVT, levels = c("1", "0")))               # Ensure EVT is a factor with the same levels
+
+```
+
+## On Test Data
+
+**Plot Sensitivity/Specificity Trade off**
+
+```{r, warning=FALSE}
+
+# 1. Predicted probabilities + true labels (Test)
+test_probs <- predict(final_knn_fit, new_data = test_data, type = "prob") %>%
+  bind_cols(test_data %>% select(EVT)) %>%
+  mutate(EVT = factor(EVT, levels = c("0","1")))  # "1" = positiv
+
+# 2. Grid der Thresholds
+thresholds <- seq(0, 1, by = 0.01)
+
+# 3. Sensitivität & Spezifität pro Threshold
+metrics_grid <- map_dfr(thresholds, function(thr) {
+  preds <- if_else(test_probs$.pred_1 >= thr, "1", "0") %>%
+    factor(levels = c("0","1"))
+  truth <- test_probs$EVT
+
+  tibble(
+    threshold   = thr,
+    sensitivity = sensitivity_vec(truth, preds, event_level = "second"),
+    specificity = specificity_vec(truth, preds, event_level = "second")
+  )
+})
+
+# 4. Plot
+ggplot(metrics_grid, aes(x = threshold)) +
+  geom_line(aes(y = sensitivity, color = "Sensitivity"), linewidth = 1) +
+  geom_line(aes(y = specificity, color = "Specificity"), linewidth = 1) +
+  scale_color_manual(values = c("Sensitivity" = "#E18727E6",
+                                "Specificity" = "#6F99ADE6")) +
+  coord_cartesian(xlim = c(0,1), ylim = c(0,1)) +
+  labs(
+    x     = "Probability Threshold",
+    y     = "Metric Value",
+    title = "Test | Sensitivity & Specificity Tradeoff",
+    color = NULL
+  ) +
+  theme_minimal()
+
+```
+
+Predict classes for the test data using a **custom threshold** to assess performance on data that the model has never seen before.
+
+```{r, warning=FALSE}
+
+# Define a custom threshold
+custom_threshold <- 0.5  # The lower the threshold, the more likely the model will predict a positive class ("1")
+
+# Make predictions with probabilities for the test data
+knn_predictions_test <- predict(final_knn_fit,
+                                new_data = test_data,
+                                type = "prob") %>%
+  mutate(
+    pred_class = if_else(.pred_1 >= custom_threshold, "1", "0"), # Apply custom threshold
+    pred_class = factor(pred_class, levels = c("1", "0"))        # Ensure pred_class is a factor
+  ) %>%
+  select(-contains("EVT")) %>%                                   # Remove any duplicate EVT columns
+  bind_cols(test_data %>% select(EVT)) %>%                       # Bind the actual EVT column
+  mutate(EVT = factor(EVT, levels = c("1", "0")))                # Ensure EVT is a factor with the same levels
+
+```
+
+\newpage
+
+# Evaluate
+
+## Confusion Matrix and Statistics
+
+**Compared to Train Label**
+
+```{r}
+
+cm_knn_train <- confusionMatrix(data = knn_predictions_train$pred_class,
+                reference = knn_predictions_train$EVT,
+                positive = "1")
+
+print(cm_knn_train)
+
+```
+
+**Compared to Test Label**
+
+```{r}
+
+cm_knn_test <- confusionMatrix(data = knn_predictions_test$pred_class,
+                reference = knn_predictions_test$EVT,
+                positive = "1")
+
+print(cm_knn_test)
+  
+```
+
+**Compared to 4I-SS**
+
+```{r}
+
+cm_4ISS_test <- confusionMatrix(data = classification_4ISS$classification_EVT,
+                reference = knn_predictions_test$EVT,
+                positive = "1")
+
+print(cm_4ISS_test)
+
+```
+
+## Confidence Intervals
+
+**Bootstapping**
+
+```{r}
+
+set.seed(456)
+bootstraps <- bootstraps(knn_predictions_test, times = 1000)
+
+```
+
+**Function to calculate metrics for each Bootstrap**
+
+```{r}
+
+calc_boot_metrics <- function(split) {
+  # extract the analysis portion (training data) from the split
+  data <- rsample::analysis(split)
+  
+  # define actual and predicted labels as factors with "0" = negative, "1" = positive
+  actual    <- factor(data$EVT, levels = c("0", "1"))
+  predicted <- factor(data$pred_class, levels = c("0", "1"))
+  # extract predicted probability for the positive class ("1")
+  probs     <- data$.pred_1
+
+  # numeric truth vector for manual Brier calculation
+  truth_num <- as.numeric(actual) - 1L
+  
+  # build ROC curve object using pROC
+  roc_obj <- pROC::roc(
+    response  = actual,    # true labels
+    predictor = probs,     # predicted probabilities for class "1"
+    levels    = c("0", "1"), 
+    direction = "<"        # higher probs indicate class "1"
+  )
+  
+  # build Precision–Recall curve object using PRROC
+  # “scores.class0 is the vector of scores belonging to the class of interest (events),
+  #  scores.class1 the scores for the other class.”
+  pr_obj <- PRROC::pr.curve(
+    scores.class0 = probs[actual == "1"],  # probabilities for positive cases
+    scores.class1 = probs[actual == "0"]   # probabilities for negative cases
+  )
+  
+  # compute scalar performance metrics with yardstick
+  tibble::tibble(
+    accuracy = yardstick::accuracy_vec(actual, predicted),
+    sensitivity = yardstick::sensitivity_vec(actual, predicted, event_level = "second"),
+    specificity = yardstick::specificity_vec(actual, predicted, event_level = "second"),
+    precision = yardstick::precision_vec(actual, predicted, event_level = "second"),
+    npv = yardstick::npv_vec(actual, predicted, event_level = "second"),
+    f1 = yardstick::f_meas_vec(actual, predicted, event_level = "second"),
+    brier = mean((truth_num - probs)^2, na.rm = TRUE),  
+    aucroc = as.numeric(roc_obj$auc),
+    aucpr = as.numeric(pr_obj$auc.integral)
+  )
+}
+
+```
+
+**Calculate metrics for all bootstraps**
+
+```{r}
+
+# Calculate metrics for all bootstraps
+boot_metrics <- bootstraps %>%
+  mutate(metrics = map(splits, ~calc_boot_metrics(.))) %>%
+  select(metrics) %>%
+  unnest(metrics)
+
+# Calculate summary statistics
+metrics_and_CI <- boot_metrics %>%
+  summarise(across(everything(),
+                  list(
+                    value = mean,
+                    lower = ~quantile(., 0.025),
+                    upper = ~quantile(., 0.975)
+                  ))) %>%
+  pivot_longer(everything(),
+               names_to = c("metric", "stat"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = stat,
+              values_from = value) %>%
+  mutate(CI_95 = sprintf("(%.3f - %.3f)", lower, upper)) %>%
+  select(metric, value, CI_95)
+
+print(metrics_and_CI)
+
+```
+
+## ROC Curve
+
+**Prepare Data**
+
+Prediction
+
+```{r}
+
+# Training
+probabilities_ml_train <- knn_predictions_train$.pred_1
+
+# Testing
+probabilities_ml_test <- knn_predictions_test$.pred_1
+
+# 4I-SS
+score_4ISS <- classification_4ISS$sum_4ISS
+
+```
+
+Label
+
+```{r}
+
+# Training
+label_train <- train_data$EVT
+
+# Testing
+label_test <- test_data$EVT
+
+# 4I-SS
+label_4ISS <- test_data$EVT
+
+```
+
+```{r}
+
+# Configure the square plot region
+par(pty = "s")
+
+# ROC for the training model
+ROC_Train <- roc(label_train, probabilities_ml_train,
+    plot = TRUE,
+    legacy.axes = TRUE,
+    percent = TRUE,
+    xlab = "1 - Specificity in %",
+    ylab = "Sensitivity in %",
+    col = "#E18727E6",
+    lwd = 4,
+    main = "ROC Curve Comparison",
+    levels = c(0, 1),         # Set 0 as control (no EVT) and 1 as case (EVT)
+    direction = "<"           # Direction: control < case (0 < 1)
+)
+
+# ROC for the test model
+ROC_Test <- plot.roc(label_test, probabilities_ml_test,
+    add = TRUE,  # Add to the existing plot
+    percent = TRUE,
+    col = "#6F99ADE6",
+    lwd = 4,
+    levels = c(0, 1),
+    direction = "<"
+)
+
+# ROC for the 4I-SS model
+ROC_4ISS <- plot.roc(label_4ISS, score_4ISS,
+    add = TRUE,  # Add to the existing plot
+    percent = TRUE,
+    col = "darkgrey",
+    lwd = 4,
+    levels = c(0, 1),
+    direction = "<"
+)
+
+# Plot adjustments: add legend
+legend("bottomright", legend = c("Train", "Test", "4I-SS"), col = c("#E18727E6", "#6F99ADE6", "darkgrey"), lwd = 4)
+
+```
+
+## Sankey Plot
+
+In this section, we generate a Sankey diagram to visualize the data flow starting from the test set. The diagram traces the path from the machine learning model's predictions to the true labels, ultimately categorizing the results into the confusion matrix metrics (True Positives, True Negatives, False Positives, False Negatives). This visualization offers a more intuitive comparison of proportions than standard tabular confusion matrices.
+
+**Prepare the Data**
+
+```{r}
+
+# Create Confusion Matrix
+
+conf_matrix_counts <- knn_predictions_test %>%
+  mutate(
+    type = case_when(
+      EVT == "0" & pred_class == "0" ~ "TN",
+      EVT == "0" & pred_class == "1" ~ "FP",
+      EVT == "1" & pred_class == "0" ~ "FN",
+      EVT == "1" & pred_class == "1" ~ "TP"
+    )
+  ) %>%
+  count(type) %>%
+  pull(n, name = type)
+
+# Values for Step 1 (Test Data)
+
+count_test_data <- nrow(test_data)
+
+# Values for Step 4 (True Negatives, False Positives, False Negatives, True Positives)
+
+TN <- ifelse(is.na(conf_matrix_counts["TN"]), 0, conf_matrix_counts["TN"])
+FP <- ifelse(is.na(conf_matrix_counts["FP"]), 0, conf_matrix_counts["FP"])
+FN <- ifelse(is.na(conf_matrix_counts["FN"]), 0, conf_matrix_counts["FN"])
+TP <- ifelse(is.na(conf_matrix_counts["TP"]), 0, conf_matrix_counts["TP"])
+
+# Values for Step 2 (Model Prediction)
+
+model_positive <- TP + FP 
+model_negative <- TN + FN
+
+# Values for Step 3 (Actual Label)
+  
+label_positive <- TP + FN 
+label_negative <- TN + FP
+
+```
+
+**Define Nodes**
+
+Defines the nodes layout without the streams.
+
+Every instance is a single vertical step.
+
+```{r}
+
+# Define nodes with names
+# The row order determines the ID (0-indexed for networkD3)
+
+nodes <- tibble(
+
+  node_name_and_count = c(
+  # define the names of the labels and their counts
+    sprintf("Test Set (n = %d)",          count_test_data),  # ID 0: Instance 1
+    
+    sprintf("Prediction No EVT (n = %d)", model_negative), # ID 1: Instance 2 (Top)
+    sprintf("Prediction EVT (n = %d)",    model_positive), # ID 2: Instance 2 (Bottom)
+    
+    sprintf("EVT Not Conducted (n = %d)", label_negative), # ID 3: Instance 3 (Top)
+    sprintf("EVT Conducted (n = %d)",     label_positive), # ID 4: Instance 3 (Bottom)
+    
+    sprintf("True Negative (n = %d)",     TN),             # ID 5: Instance 4 (TN)
+    sprintf("False Positive (n = %d)",    FP),             # ID 6: Instance 4 (FP)
+    sprintf("False Negative (n = %d)",    FN),             # ID 7: Instance 4 (FN)
+    sprintf("True Positive (n = %d)",     TP)              # ID 8: Instance 4 (TP)
+  ),
+  node_color = c(
+    "Node_Test",
+    "Node_Pred",
+    "Node_Pred",
+    "Node_Label",
+    "Node_Label",
+    "GoodNode",
+    "BadNode",
+    "BadNode",
+    "GoodNode"
+  )
+)
+
+nodes <- as.data.frame(nodes)
+
+```
+
+**Define Links**
+
+Defines the flow logic (streams) of the data and the groups for the colors (each group gets a different color)
+
+```{r}
+
+links <- data.frame(
+  # Index of source node
+  source = c(0, 0, 1, 1, 2, 2, 3, 3, 4, 4), 
+  
+  # Index of target node
+  target = c(1, 2, 3, 4, 3, 4, 5, 6, 7, 8),
+  
+  # Magnitude of each flow
+  value  = c(TN + FN, TP + FP, TN, FN, FP, TP, TN, FP, FN, TP),
+  
+  # Group for coloring links
+  # 0 -> 1/2       : Test Set -> Prediction      = FlowTestPred
+  # 1/2 -> 3/4     : Prediction -> Label         = FlowPredLabel
+  # 3/4 -> 5/6/7/8 : Label -> Outcome (TN/FP/FN/TP) = FlowOutcome (neutral)
+  flow_color  = c(
+    "FlowTestPred", "FlowTestPred",   # 0 → 1,2
+    "FlowPredLabel","FlowPredLabel",  # 1 → 3,4
+    "FlowPredLabel","FlowPredLabel",  # 2 → 3,4
+    "GoodNode",  # 3 → 5 (TN)  green
+    "BadNode",   # 3 → 6 (FP)  red
+    "BadNode",   # 4 → 7 (FN)  red
+    "GoodNode"   # 4 → 8 (TP)  green
+  )
+)
+
+```
+
+**Define Colors**
+
+```{r}
+
+colourScale <- '
+d3.scaleOrdinal()
+  .domain([
+    "FlowTestPred",
+    "FlowPredLabel",
+    "FlowOutcome",
+    "Node_Test",
+    "Node_Pred",
+    "Node_Label",
+    "GoodNode",
+    "BadNode"
+  ])
+  .range([
+    "#E18727E6",    // Test -> Pred
+    "#E18727E6",    // Pred -> Label
+    "#D0AF84FF",    // Label -> Outcome (neutral)
+    "#E18727E6",    // Test Data
+    "#E18727E6",    // Predictions
+    "#E18727E6",    // Label
+    "#20854EE6",    // GoodNode (TN/TP) – green
+    "#BC3C29E6"     // BadNode  (FP/FN) – red
+  ])
+'
+
+```
+
+**Plot the Sankey**
+
+We use `networkD3::sankeyNetwork` to create an interactive Sankey diagram in HTML format.
+
+```{r}
+
+networkD3::sankeyNetwork(
+  Links      = links,
+  Nodes      = nodes,
+  Source     = "source",
+  Target     = "target",
+  Value      = "value",
+  NodeID     = "node_name_and_count",
+  LinkGroup  = "flow_color",      
+  NodeGroup  = "node_color",
+  colourScale = colourScale,
+  nodeWidth  = 10,
+  nodePadding = 30,
+  fontSize   = 14,
+  iterations = 0
+  )
+
+```
+
+# Save the Model
+
+```{r}
+#| include: false
+
+# Save the trained model
+saveRDS(final_knn_fit, "models/final_knn_model.rds")
+
+```
