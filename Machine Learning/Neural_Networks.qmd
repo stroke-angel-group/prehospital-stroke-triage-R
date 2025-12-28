@@ -1148,91 +1148,151 @@ print(cm_4ISS_test)
 
 ## Confidence Intervals
 
-**Bootstapping**
-
-```{r}
-
-set.seed(456)
-bootstraps <- bootstraps(nn_predictions_test, times = 1000)
-
-```
-
 **Function to calculate metrics for each Bootstrap**
 
+We create a custom function to calculate all metrics for each bootstrapped dataset.
+
 ```{r}
 
-calc_boot_metrics <- function(split) {
-  # extract the analysis portion (training data) from the split
-  data <- rsample::analysis(split)
+calc_boot_metrics_function <- function(data, indices, ...) {
   
-  # define actual and predicted labels as factors with "0" = negative, "1" = positive
-  actual    <- factor(data$EVT, levels = c("0", "1"))
+  # Create a new dataset by bootstrapping the original rows (patient-level resampling)
+  data <- data[indices, ]
+  
+  # Define actual and predicted labels as factors with "0" = negative, "1" = positive
+  actual    <- factor(data$EVT,        levels = c("0", "1"))
   predicted <- factor(data$pred_class, levels = c("0", "1"))
-  # extract predicted probability for the positive class ("1")
-  probs     <- data$.pred_1
-
-  # numeric truth vector for manual Brier calculation
+  
+  # Extract predicted probability for the positive class ("1")
+  probs <- data$.pred_1
+  
+  # Numeric truth vector for manual Brier calculation
   truth_num <- as.numeric(actual) - 1L
   
-  # build ROC curve object using pROC
+  # Build ROC curve object using pROC
   roc_obj <- pROC::roc(
     response  = actual,    # true labels
     predictor = probs,     # predicted probabilities for class "1"
-    levels    = c("0", "1"), 
+    levels    = c("0", "1"),
     direction = "<"        # higher probs indicate class "1"
   )
   
-  # build Precision–Recall curve object using PRROC
-  # “scores.class0 is the vector of scores belonging to the class of interest (events),
-  #  scores.class1 the scores for the other class.”
+  # Build Precision–Recall curve object using PRROC
   pr_obj <- PRROC::pr.curve(
     scores.class0 = probs[actual == "1"],  # probabilities for positive cases
     scores.class1 = probs[actual == "0"]   # probabilities for negative cases
   )
   
-  # compute scalar performance metrics with yardstick
-  tibble::tibble(
-    accuracy = yardstick::accuracy_vec(actual, predicted),
+  # Return scalar performance metrics as a named numeric vector
+  c(
+    accuracy    = yardstick::accuracy_vec(actual, predicted),
     sensitivity = yardstick::sensitivity_vec(actual, predicted, event_level = "second"),
     specificity = yardstick::specificity_vec(actual, predicted, event_level = "second"),
-    precision = yardstick::precision_vec(actual, predicted, event_level = "second"),
-    npv = yardstick::npv_vec(actual, predicted, event_level = "second"),
-    f1 = yardstick::f_meas_vec(actual, predicted, event_level = "second"),
-    brier = mean((truth_num - probs)^2, na.rm = TRUE),  
-    aucroc = as.numeric(roc_obj$auc),
-    aucpr = as.numeric(pr_obj$auc.integral)
+    precision   = yardstick::precision_vec(actual, predicted, event_level = "second"),
+    npv         = yardstick::npv_vec(actual, predicted, event_level = "second"),
+    f1          = yardstick::f_meas_vec(actual, predicted, event_level = "second"),
+    brier       = mean((truth_num - probs)^2, na.rm = TRUE),
+    aucroc      = as.numeric(roc_obj$auc),
+    aucpr       = as.numeric(pr_obj$auc.integral)
   )
 }
 
 ```
 
-**Calculate metrics for all bootstraps**
+**Create and Calculate Metrics for All Bootstraps**
+
+The `boot::boot()` function generates R non-parametric bootstrap resamples (sampling test-set observations with replacement) from the original test dataset and applies the user-defined statistic function to each resample to recompute the performance metrics.
 
 ```{r}
 
-# Calculate metrics for all bootstraps
-boot_metrics <- bootstraps %>%
-  mutate(metrics = map(splits, ~calc_boot_metrics(.))) %>%
-  select(metrics) %>%
-  unnest(metrics)
+set.seed(456)
 
-# Calculate summary statistics
-metrics_and_CI <- boot_metrics %>%
-  summarise(across(everything(),
-                  list(
-                    value = mean,
-                    lower = ~quantile(., 0.025),
-                    upper = ~quantile(., 0.975)
-                  ))) %>%
-  pivot_longer(everything(),
-               names_to = c("metric", "stat"),
-               names_sep = "_") %>%
-  pivot_wider(names_from = stat,
-              values_from = value) %>%
-  mutate(CI_95 = sprintf("(%.3f - %.3f)", lower, upper)) %>%
-  select(metric, value, CI_95)
+# Run nonparametric BCa bootstrap using boot package
 
-print(metrics_and_CI)
+boot_results <- boot::boot(
+  data      = nn_predictions_test,        # dataset to bootstrapp      
+  statistic = calc_boot_metrics_function, # custom function to calcualte all metrics
+  R         = 5000                        # amount of bootstrapps
+)
+
+# Extract metric names (and their order) from the original statistic
+# to consistently label bootstrap replicates and confidence intervals
+
+metric_names <- names(boot_results$t0)
+
+```
+
+**Visual Bootstrap Distribution Diagnostics for Confidence Interval Selection**
+
+We plot the distributions to assess whether the metric values from the 5,000 bootstrap resamples are approximately symmetric or noticeably skewed. Based on this visual check, we decide whether to report percentile confidence intervals or to use bias-corrected and accelerated (BCa) confidence intervals computed from the 5,000 bootstrap values.
+
+```{r}
+
+# Convert bootstrap replicate matrix to a tidy long data frame
+# For the ggridges package
+
+boot_results_long <- as.data.frame(boot_results$t) %>%
+  setNames(metric_names) %>%
+  tidyr::pivot_longer(
+    cols      = dplyr::everything(),
+    names_to  = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    metric = factor(metric, levels = metric_names)
+  )
+
+
+# Ridgeline plot of bootstrap distributions (using ggridges)
+
+ggplot(boot_results_long, aes(x = value, y = metric, fill = metric)) +
+  ggridges::geom_density_ridges(
+    alpha = 0.7,
+    scale = 1.1,
+    color = "black",
+    linewidth = 0.4
+  ) +
+  theme_ridges() +
+  theme(legend.position = "none") +
+  labs(x = NULL, y = NULL)
+
+```
+
+**Determine Bias-Corrected Confidence Intervals (BCa)**
+
+Because the bootstrap distribution plots showed skewness for some performance metrics, we calculated bias-corrected and accelerated (BCa) confidence intervals using `boot::boot.ci(type = "bca")`. BCa intervals still provide a 95% confidence interval, but unlike the percentile method they do not have to use 2.5% in each tail. Instead, BCa shifts the lower and upper cut-offs to account for bias and skewness in the bootstrap distribution, while the total probability outside the interval remains 5%.
+
+```{r}
+
+# Compute BCa 95% confidence intervals for each metric
+
+metrics_and_CI_bca <- purrr::map_dfr(seq_along(metric_names), function(i) {
+
+  # Compute 95% BCa CI for metric i
+  ci <- boot::boot.ci(
+    boot_results,
+    type  = "bca",   # bias-corrected and accelerated (BCa) method
+    conf  = 0.95,    # 95% confidence level
+    index = i
+  )
+
+  # Bootstrap mean (mean over all resamples) for metric i
+  boot_mean <- mean(boot_results$t[, i], na.rm = TRUE)
+
+  tibble::tibble(
+    metric = metric_names[i],
+    value  = boot_mean,
+    lower  = ci$bca[4],
+    upper  = ci$bca[5]
+  )
+}) %>%
+  dplyr::mutate(
+    CI_95 = sprintf("(%.3f - %.3f)", lower, upper)
+  ) %>%
+  dplyr::select(metric, value, CI_95)
+
+# Print metrics and CIs
+print(metrics_and_CI_bca)
 
 ```
 
