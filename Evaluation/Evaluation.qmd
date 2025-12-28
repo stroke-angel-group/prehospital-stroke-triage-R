@@ -1109,3 +1109,411 @@ legend("bottomright", legend = age_labels_with_auc,
 par(mfrow = c(1, 1))
 
 ```
+
+# Bootstrapped Performance Distributions
+
+This section compares the bootstrap distributions and confidence intervals of performance metrics across all models using ridgeline plots. We use 5,000 bootstrap resamples with BCa (bias-corrected and accelerated) confidence intervals, consistent with the methodology applied in individual model scripts.
+
+## Data Preparation
+
+We define a custom function to calculate all performance metrics for each bootstrapped dataset. This function will be called by \`boot::boot()\` for each of the 5,000 resamples.
+
+**Choose Model Thresholds from the ML-Scripts**
+
+```{r}
+
+model_thresholds <- c(
+  "OneR"  = 0.5,
+  "KNN"   = 0.5,
+  "CART"  = 0.4,  
+  "XGB"   = 0.4,   
+  "RF"    = 0.4,   
+  "NN"    = 0.4,   
+  "4I-SS" = 2/7   # 2/7 equals Score > 2
+)
+
+```
+
+**Create a Single Master Table with all Information for the Bootstrapping**
+
+We create a dataframe with the label (ground truth), all observations of the test data, and the predicted probability for each model.
+
+```{r}
+
+# Combines truth and probabilities/scores from all models
+data_for_bootstrapping <- tibble(
+     EVT     = label_test,
+     OneR    = model_scores$OneR,
+     CART 
+   = model_scores$CART,
+     KNN     = model_scores$KNN,
+     XGB     = model_scores$XGB,
+     RF      = model_scores$RF,
+     NN      = model_scores$NN,
+     `4I-SS` = model_scores$`4I-SS`
+)
+
+# Check the data structure
+head(data_for_bootstrapping)
+
+```
+
+## Define Custom Function
+
+We define a custom function to calculate all performance metrics for each bootstrapped dataset. This function will be called by \`boot::boot()\` for each of the 5,000 resamples.
+
+```{r}
+
+calc_boot_metrics_all_models <- function(data, indices) {
+
+  # Resample data for paired bootstrapping
+  d <- data[indices, ]
+  model_names <- names(model_thresholds)
+  results <- c()
+
+  for (model in model_names) {
+    probs <- d[[model]]
+    truth <- d$EVT
+    thresh <- model_thresholds[[model]]
+
+    # Apply model-specific threshold for binary classification
+    pred_class <- factor(ifelse(probs > thresh, "1", "0"),
+                         levels = c("1", "0"))
+
+    # Calculate threshold-independent metrics
+    roc_obj <- pROC::roc(truth,
+                         probs,
+                         levels = c("0", "1"),
+                         direction = "<",
+                         quiet = TRUE)
+    
+    aucroc <- as.numeric(roc_obj$auc)
+
+    pr_obj <- PRROC::pr.curve(scores.class0 = probs[truth == "1"],
+                              scores.class1 = probs[truth == "0"],
+                              curve = FALSE)
+    aucpr <- pr_obj$auc.integral
+
+    # Calculate threshold-dependent metrics
+    acc  <- yardstick::accuracy_vec(truth, pred_class)
+    sens <- yardstick::sensitivity_vec(truth, pred_class, event_level = "first")
+    spec <- yardstick::specificity_vec(truth, pred_class, event_level = "first")
+    ppv  <- yardstick::precision_vec(truth, pred_class, event_level = "first")
+    npv  <- yardstick::npv_vec(truth, pred_class, event_level = "first")
+    f1   <- yardstick::f_meas_vec(truth, pred_class, event_level = "first")
+
+    
+    # Add metrics to resulting vector 
+    results <- c(results, aucroc, aucpr, acc, sens, spec, f1, ppv, npv)
+  }
+  return(results)
+}
+
+```
+
+We perform the bootstrap simulation with 5,000 replicates.
+
+```{r}
+
+set.seed(456)
+
+# Execute bootstrapping with 5,000 replicates using the statistic function
+boot_results_all <- boot::boot(
+  data = data_for_bootstrapping,
+  statistic = calc_boot_metrics_all_models,
+  R = 5000 
+)
+
+# Define metrics strictly matching the function output order
+calc_order_names <- c("AUCROC",
+                      "AUCPR",
+                      "Accuracy",
+                      "Sensitivity",
+                      "Specificity",
+                      "F1",
+                      "PPV",
+                      "NPV")
+
+model_names <- names(model_thresholds) 
+
+# Create column mapping
+col_mapping <- expand.grid(Metric = calc_order_names, Model = model_names)
+
+# Convert matrix to a dataframe
+boot_samples_df <- as.data.frame(boot_results_all$t)
+
+# Assign column names
+colnames(boot_samples_df) <- paste(col_mapping$Model, col_mapping$Metric, sep = "_")
+
+# Define visualization order
+desired_plot_order <- c("AUCROC",
+                        "AUCPR",
+                        "Accuracy",
+                        "Sensitivity",
+                        "Specificity",
+                        "PPV",
+                        "NPV",
+                        "F1")
+
+# Transform to long format and set factor levels for plotting
+boot_results_all_long <- boot_samples_df %>%
+  pivot_longer(everything(), names_to = "Model_Metric", values_to = "Value") %>%
+  separate(Model_Metric, into = c("Model", "Metric"), sep = "_", extra = "merge") %>%
+  mutate(
+    Model = factor(Model, levels = model_names),
+    Metric = factor(Metric, levels = desired_plot_order) 
+  )
+
+```
+
+**Calculate BCa´s Confidence Intervals**
+
+```{r}
+
+# BCa CI helper that returns lower/upper
+get_bca_limits <- function(boot_obj, index, conf) {
+  ci <- boot::boot.ci(boot_obj, type = "bca", conf = conf, index = index)
+  ci$bca[4:5]  # lower, upper
+}
+
+get_bca_and_mean <- function(boot_obj, index) {
+
+  # Calculate the bootstrap mean to include it in the plot
+  boot_mean <- mean(boot_obj$t[, index], na.rm = TRUE)
+
+  # Calculate uncertainty bands for BCa 95/80/50
+  ci95 <- get_bca_limits(boot_obj, index, 0.95)
+  ci80 <- get_bca_limits(boot_obj, index, 0.80)
+  ci50 <- get_bca_limits(boot_obj, index, 0.50)
+
+  list(
+    mean = boot_mean * 100,
+    q025 = ci95[1] * 100, q975 = ci95[2] * 100,
+    q10  = ci80[1] * 100, q90  = ci80[2] * 100,
+    q25  = ci50[1] * 100, q75  = ci50[2] * 100
+  )
+}
+
+# Build intervals per Model and Metric 
+interval_data <- purrr::map_dfr(seq_len(nrow(col_mapping)), function(i) {
+
+  res <- get_bca_and_mean(boot_results_all, index = i)
+
+  tibble::tibble(
+    Model  = col_mapping$Model[i],
+    Metric = col_mapping$Metric[i],
+    mean   = res$mean,
+    q025   = res$q025, q975 = res$q975,
+    q10    = res$q10,  q90  = res$q90,
+    q25    = res$q25,  q75  = res$q75
+  )
+}) %>%
+  dplyr::mutate(
+    Model = factor(Model, levels = rev(model_names)),
+    Metric = factor(Metric, levels = desired_plot_order),
+    mean_label = sprintf("%.0f", mean)
+  )
+
+# Prepare long bootstrap data (for densities + axis ranges)
+plot_data <- boot_results_all_long %>%
+  dplyr::mutate(
+    Model  = factor(Model, levels = rev(model_names)),
+    Metric = factor(Metric, levels = desired_plot_order),
+    perf   = Value * 100
+  )
+
+# Per-metric x-range for text and headers
+metric_meta <- plot_data %>%
+  dplyr::group_by(Metric) %>%
+  dplyr::summarise(
+    min_val = min(perf, na.rm = TRUE),
+    max_val = max(perf, na.rm = TRUE),
+    range   = max_val - min_val,
+    .groups = "drop"
+  )
+
+interval_data <- interval_data %>%
+  dplyr::left_join(metric_meta, by = "Metric") %>%
+  dplyr::mutate(text_x = min_val - (range * 0.18))
+
+# Headers and smaller titels
+n_models <- length(model_names)
+
+header_data <- metric_meta %>%
+  dplyr::mutate(
+    y_pos  = n_models + 1.0,
+    text_x = min_val - (range * 0.18),
+    label  = "Mean"
+  )
+
+title_data <- metric_meta %>%
+  dplyr::mutate(
+    y_pos  = n_models + 2.2,
+    text_x = min_val - (range * 0.18),
+    label  = as.character(Metric)
+  )
+
+# Set same colors as model have in the ROC and PR curves
+model_colors_base <- setNames(
+  substr(colors_nejm_alpha90[seq_along(model_names)], 1, 7),
+  model_names
+)
+
+# Band widths (95/80/50)
+band_lwd_95 <- 2.6
+band_lwd_80 <- 3.0
+band_lwd_50 <- 3.4
+
+```
+
+## Create `ggdist`-Plots
+
+```{r}
+
+# Define model colors matching the ROC curves
+colors_nejm_alpha90 <- c(
+       "#BC3C29E6",
+       "#E18727E6",
+       "#0072B5E6",
+       "#20854EE6", 
+       "#7876B1E6",
+       "#6F99ADE6",
+       "#FFDC91E6",
+       "#EE4C97E6"
+       )
+
+```
+
+**Standardize Text Positions for 0-100 Scale**
+
+We overwrite the text_x coordinates to ensure alignment across all facets on the fixed 0-100 scale.
+
+```{r}
+
+# Position the "Mean" column on the left (e.g., at x = 5%)
+interval_data$text_x <- 5 
+header_data$text_x   <- 5
+
+# Position the Metric Titles also on the left (e.g., at x = 5%)
+title_data$text_x    <- 5
+
+```
+
+**Do the Plot Using `ggplot` and `ggdist`**
+
+```{r}
+
+ridget_plot <- ggplot(plot_data, aes(x = perf, y = Model)) +
+
+  # A. Density
+  ggdist::stat_slab(
+    fill = "grey85",        
+    alpha = 1,
+    color = NA,
+    adjust = 0.8,
+    width = 0.6,            
+    justification = -0.2,   
+    normalize = "groups"    
+  ) +
+
+  # B. Intervals
+  geom_linerange(
+    data = interval_data,
+    aes(y = Model, xmin = q025, xmax = q975, color = Model),
+    linewidth = band_lwd_95, alpha = 0.50, inherit.aes = FALSE, show.legend = FALSE
+  ) +
+  geom_linerange(
+    data = interval_data,
+    aes(y = Model, xmin = q10, xmax = q90, color = Model),
+    linewidth = band_lwd_80, alpha = 0.75, inherit.aes = FALSE, show.legend = FALSE
+  ) +
+  geom_linerange(
+    data = interval_data,
+    aes(y = Model, xmin = q25, xmax = q75, color = Model),
+    linewidth = band_lwd_50, alpha = 1.00, inherit.aes = FALSE, show.legend = FALSE
+  ) +
+
+  # C. Mean Point
+  geom_point(
+    data = interval_data,
+    aes(x = mean, y = Model),
+    inherit.aes = FALSE, color = "black", size = 1.5, show.legend = FALSE
+  ) +
+
+  # D. Numbers Column 
+  geom_text(
+    data = interval_data,
+    aes(x = text_x, y = Model, label = mean_label),
+    inherit.aes = FALSE,
+    size = 3.2,
+    family = "mono",
+    fontface = "bold",
+    color = "grey20",
+    hjust = 0.5 
+  ) +
+
+  # E. Header "Mean" 
+  geom_text(
+    data = header_data,
+    aes(x = text_x, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    size = 3,
+    fontface = "bold",
+    color = "grey30",
+    hjust = 0.5, 
+    vjust = 0 
+  ) +
+
+  # F. Metric Title 
+  geom_text(
+    data = title_data,
+    aes(x = text_x, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    size = 4.5,        # bigger than the rest
+    fontface = "bold",
+    color = "black",
+    hjust = 0.5,       # centered
+    vjust = 0
+  ) +
+
+  # free_x for 0-100 across all x axis
+  facet_wrap(~Metric, scales = "free_x", ncol = 2) +
+
+  # Apply NEJM Colors
+  scale_color_manual(values = model_colors_base) +
+   
+  # Scales from 0 to 100
+  scale_x_continuous(
+     breaks = seq(0, 100, by = 10),
+     expand = expansion(mult = c(0, 0.05)) 
+  ) +
+   
+  scale_y_discrete(
+    # For more title space
+    expand = expansion(mult = c(0.05, 0.45)) 
+  ) +
+
+  coord_cartesian(xlim = c(0, 100), clip = "off") +
+
+  labs(x = "Performance (%)", y = NULL) +
+
+  theme_minimal(base_family = "sans") +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.3, color = "grey92"), 
+    panel.grid.major.x = element_line(linewidth = 0.3, color = "grey92"), 
+    strip.text = element_blank(), 
+    strip.background = element_blank(),
+    axis.text.y = element_text(face = "bold", size = 9, color = "black", hjust = 0),
+    axis.text.x = element_text(size = 8, color = "grey30"),
+    axis.title.x = element_text(size = 10, margin = margin(t = 10)),
+
+    panel.spacing = unit(2.5, "lines"), 
+    plot.margin = margin(t = 40, r = 10, b = 10, l = 10)
+  )
+
+# Print the plot and supress "Picking joint bandwidth..."
+suppressMessages(print(ridget_plot))
+
+```

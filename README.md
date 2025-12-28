@@ -84,7 +84,7 @@ This folder contains the training pipeline for six machine learning models: OneR
 
 ### `Folder: Evaluation`
 
-Here, we first load the best-performing models for all machine learning algorithms and compare their performance using ROC and PRC curves. In addition, following the TRIPOD-AI recommendations, we perform a risk group analysis and compare ROC curves stratified by sex (male/female) and by age groups.
+We compared the top-performing models using ROC and PRC curves. Following TRIPOD-AI standards, we conducted a risk group analysis by stratifying performance by sex and age. Furthermore, we visualized the stability of performance metrics across all models by comparing bootstrap distributions and confidence intervals.
 
 ### `Folder: Feature Importance`
 
