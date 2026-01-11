@@ -25,7 +25,7 @@ Key R packages:
 -   dplyr
 -   tidyr
 
-Get the Code
+**Get the Code:**
 
 First, download the repository to your local machine.
 
@@ -35,7 +35,7 @@ First, download the repository to your local machine.
 You can clone the repository via the command line:
 
 ``` bash
-git clone https://github.com/moser-oliver/prehospital-stroke-triage-R.git
+git clone https://github.com/stroke-angel-group/prehospital-stroke-triage-R.git
 ```
 
 **Data**
