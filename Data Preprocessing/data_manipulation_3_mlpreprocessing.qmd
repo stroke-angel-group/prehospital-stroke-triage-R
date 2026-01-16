@@ -1,0 +1,608 @@
+---
+title: "Data Manipulation 3: Preprocessing"
+format: html
+editor: visual
+---
+
+```{r}
+
+library(here) # Project-relative paths & file management
+
+library(tidyverse) # data manipulation
+library(caret) # ml preprocessing
+
+```
+
+**Load Data as a tibble**
+
+```{r}
+
+stroke_triage_data <- read_csv(here("Code",
+                                    "Data Preprocessing",
+                                    "data_manipulation_2_editing",
+                                    "data_manipulation_2_editing.csv"))
+
+```
+
+**Glimpse at the data**
+
+```{r}
+
+# Display the first few rows of the dataset
+head(stroke_triage_data)
+
+```
+
+## Set Column Classes
+
+To ensure that functions work properly, we will first set the column classes for the data. This will ensure that the data is read in as the correct type.
+
+```{r}
+
+
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(
+    
+    # Numerical columns
+    age = as.numeric(age),
+    bp_systolic = as.numeric(bp_systolic),
+    bp_diastolic = as.numeric(bp_diastolic),
+    pulse = as.numeric(pulse),
+    blood_glucose = as.numeric(blood_glucose),
+    temperature = as.numeric(temperature),
+    vigilance_4ISS = as.numeric(vigilance_4ISS),
+    gaze_head_deviation_4ISS = as.numeric(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS = as.numeric(hemiparesis_4ISS),
+    aphasia_dysarthria_4ISS = as.numeric(aphasia_dysarthria_4ISS),
+    score_4ISS = as.numeric(score_4ISS),
+    score_GCS = as.numeric(score_GCS),
+    GCS_eyes = as.numeric(GCS_eyes),
+    GCS_motor = as.numeric(GCS_motor),
+    GCS_verbal = as.numeric(GCS_verbal),
+    NIHSS_at_admission = as.numeric(NIHSS_at_admission),
+    TOO = as.numeric(TOO),
+    
+    # Categorical columns
+    gender = as.factor(gender),
+    pupil_reaction_right = as.factor(pupil_reaction_right),
+    pupil_reaction_left = as.factor(pupil_reaction_left),
+    consciousness_state = as.factor(consciousness_state),
+    infection = as.factor(infection),
+    medication_anticoags = as.factor(medication_anticoags),
+    medication_antiplatelets = as.factor(medication_antiplatelets),
+    exclusion_TOO = as.factor(exclusion_TOO),
+    exclusion_anticoag_status = as.factor(exclusion_anticoag_status),
+    exclusion_surgery_status = as.factor(exclusion_surgery_status),
+    ways_of_admission_transport = as.factor(ways_of_admission_transport),
+    ways_of_admission_origin = as.factor(ways_of_admission_origin),
+    diagnosis_admission = as.factor(diagnosis_admission),
+    diagnosis_discharge = as.factor(diagnosis_discharge),
+    IVT = as.factor(IVT),
+    EVT = as.factor(EVT),
+    mortality = as.factor(mortality),
+    
+    # Date column
+    time_of_arrival = ymd_hms(time_of_arrival, tz = "UTC")
+  )
+
+```
+
+**Convert missing values to NaN**
+
+```{r}
+
+# List of values to be treated as NA
+missing_values <- c("", " ", "NA", "N/A", "n/a", "na", "nan", "NaN", "null", "Null", "None", "none", "-", -4, -1)
+
+# Replace missing values in the entire DataFrame
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(across(everything(), ~replace(., . %in% missing_values, NA)))
+
+```
+
+```{r}
+
+# Check the structure and data types of the dataframe
+str(stroke_triage_data)
+
+```
+
+## Extract the Year of Each Record
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>% mutate(
+  # extract the year of the timestamp
+  year_of_arrival = year(time_of_arrival)) %>% 
+  # drop timestamp variable
+  select(-time_of_arrival)
+
+```
+
+## Round all numerical columns to no digits after the comma
+
+```{r}
+
+# Round all specified numerical columns to no digit after the comma
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(across(c(bp_systolic, bp_diastolic, pulse, blood_glucose, temperature, 
+                  vigilance_4ISS, gaze_head_deviation_4ISS, hemiparesis_4ISS, 
+                  aphasia_dysarthria_4ISS, score_4ISS, GCS_eyes, GCS_motor, 
+                  GCS_verbal, TOO), round, digits = 1))
+
+```
+
+# **Diverse Preprocessing**
+
+**Convert NA´s to 0 in the mortality, EVT and IVT column**
+
+We assume, that NA´s in the DTCT, mortality, EVT and IVT column could be converted to a 0. That means, no therapy was conducted.
+
+```{r}
+
+# Replace missing values with 'no' for the 'DTCT' column
+# stroke_triage_data$DTCT[is.na(stroke_triage_data$DTCT)] <- 0
+
+# Replace missing values with 'no' for the 'mortality' column
+stroke_triage_data$mortality[is.na(stroke_triage_data$mortality)] <- 0
+
+# Replace missing values with 'no' for the 'IVT' column
+stroke_triage_data$IVT[is.na(stroke_triage_data$IVT)] <- 0
+
+# Replace missing values with 'no' for the 'EVT' column
+stroke_triage_data$EVT[is.na(stroke_triage_data$EVT)] <- 0
+
+```
+
+**Convert negative temperature to NA**
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(temperature = ifelse(temperature < 0, NA, temperature))
+
+```
+
+**Delete Entries for TOO above 10000 Hours**
+
+Show Records
+
+```{r}
+
+stroke_triage_data %>% filter(TOO > 10000)
+
+```
+
+For better readability in the comparing crosstable in the EDA file. Otherwise the TOO Max is shown as "9.6e+08"
+
+```{r}
+  
+stroke_triage_data <- stroke_triage_data %>%
+  filter(TOO <= 10000 | is.na(TOO))
+
+```
+
+# Aggregate Levels of Categorical Variables
+
+**Overview**
+
+In the field of machine learning, especially in healthcare applications such as stroke triage, the complexity and granularity of data can significantly impact model performance and interpretability. To address this, we often need to simplify the data by aggregating detailed categories into broader, more general levels. This process involves combining several specific categories into fewer, more comprehensive groups.
+
+**Process of Aggregation**
+
+Identify Categories for Aggregation: Review the dataset to identify columns with a wide range of categories that can be logically grouped together. This is particularly relevant for categorical data where numerous distinct values may represent similar states or conditions.
+
+Define New Aggregated Categories:
+
+-   Determine how to combine the existing categories into broader ones that retain critical information while reducing complexity.
+-   Ensure that these new categories are clinically relevant and meaningful for the analysis.
+
+Apply the Aggregation:
+
+-   Create new columns in the dataset to reflect these aggregated categories.
+-   Utilize mapping or conditional logic in Python to assign each original entry to its new aggregated category.
+
+Handle Missing Data:
+
+-   Decide how to handle NaN or missing values – whether to treat them as a separate category or impute them based on certain criteria.
+
+### Aggregate Pupil Assessment
+
+Assessing the levels of the pupil reaction columns.
+
+```{r}
+
+# Display all unique levels in the 'pupil_reaction_right' column
+unique_pupil_right <- unique(stroke_triage_data$pupil_reaction_right)
+print(unique_pupil_right)
+
+# Display all unique levels in the 'pupil_reaction_left' column
+unique_pupil_left <- unique(stroke_triage_data$pupil_reaction_left)
+print(unique_pupil_left)
+
+
+```
+
+In the field of machine learning applied to stroke recognition, analyzing and categorizing pupil reactions can be a significant factor. The condition and behavior of pupils can yield important clues about neurological health. Specifically, certain characteristics like anisocoria and irregular pupil shape are particularly relevant for identifying potential strokes.
+
+**Categories of Pupil Reactions:**
+
+We propose categorizing pupil reactions into four distinct groups, based on their relevance to stroke symptoms:
+
+1.  **Normal**: This category is assigned when both pupils (left and right) display normal reactions and shapes. This implies no apparent signs of neurological impairment from a pupillary perspective.
+
+2.  **Anisocoria**: Refers to a condition where there is an inequality in the size of the pupils. In our dataset, this category is assigned when the size or reaction of the left pupil (`pupil_reaction_left`) is different from the right (`pupil_reaction_right`). Anisocoria can be a sign of neurological issues and is particularly significant in stroke identification.
+
+3.  **Irregular (Entrundet)**: This category is used when either pupil is irregularly shaped, which is noted as 'entrundet' in our data. Irregularly shaped pupils can indicate serious neurological distress and are crucial for stroke detection.
+
+4.  **NaN (Missing Data)**: It's essential to have a separate category for missing or unavailable data to avoid misclassification and to handle these instances appropriately within the machine learning model.
+
+```{r}
+
+# Define the categorize_pupil_reaction function
+categorize_pupil_reaction <- function(row) {
+  if (is.na(row$pupil_reaction_right) | is.na(row$pupil_reaction_left)) {
+    return(NA)
+  } else if (row$pupil_reaction_right == 'entrundet' | row$pupil_reaction_left == 'entrundet') {
+    return('1')
+  } else if (row$pupil_reaction_right != row$pupil_reaction_left) {
+    return('1')
+  } else {
+    return('0')
+  }
+}
+
+# Apply the function to each row using mutate
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(pupil_reaction_abnormal = sapply(1:nrow(stroke_triage_data), function(i) categorize_pupil_reaction(stroke_triage_data[i,])))
+
+# Convert the new column to a factor
+stroke_triage_data$pupil_reaction_abnormal <- as.factor(stroke_triage_data$pupil_reaction_abnormal)
+
+# drop the single eye assesments
+stroke_triage_data <- stroke_triage_data %>% select(-c(pupil_reaction_left, pupil_reaction_right))
+
+```
+
+**Check Data**
+
+```{r}
+
+# Obtain summary statistics for the dataframe
+summary(stroke_triage_data)
+
+```
+
+### Aggregate States of Consciousness
+
+```{r}
+
+# Get unique values in 'consciousness_state' column
+unique_consciousness_states <- unique(stroke_triage_data$consciousness_state)
+
+# Iterate over each unique value and print it
+for (level in unique_consciousness_states) {
+  cat(level, "\n")
+}
+
+```
+
+```{r}
+
+# Define the categorization function
+categorize_consciousness <- function(level) {
+  if (is.na(level)) {
+    return(NA)
+  } else if (level %in% c('wach/ansprechbar', 'wach', 'unauffällig', 'reagiert auf Ansprache')) {
+    return(0)
+  } else {
+    return(1)
+  }
+}
+
+# Apply the categorization function to 'consciousness_state' using mutate
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(consciousness_impaired = sapply(stroke_triage_data$consciousness_state, function(x) categorize_consciousness(x)))
+
+# Insert new column after 'pupil_reaction_abnormal' column
+pupil_reaction_left_idx <- which(names(stroke_triage_data) == 'pupil_reaction_abnormal')
+
+stroke_triage_data <- stroke_triage_data %>%
+  dplyr::select(1:pupil_reaction_left_idx,
+                consciousness_impaired,
+                all_of("pupil_reaction_abnormal"),
+                (pupil_reaction_left_idx + 1):ncol(stroke_triage_data))
+
+# Drop the 'consciousness_state' column
+stroke_triage_data <- stroke_triage_data %>%
+  select(-consciousness_state)
+
+# Convert the new column to a factor
+stroke_triage_data$consciousness_impaired <- as.factor(stroke_triage_data$consciousness_impaired)
+
+# exclude row where all values are NA
+stroke_triage_data <- stroke_triage_data %>%
+  filter(!if_all(everything(), is.na))
+
+```
+
+```{r}
+
+# Get unique values in 'consciousness_impaired' column
+unique_consciousness <- levels(stroke_triage_data$consciousness_impaired)
+
+# Iterate over each unique value and print it
+for (level in unique_consciousness) {
+  cat(level, "\n")
+}
+
+```
+
+### Simplify Antithrombotic Medication
+
+The dataset contains information on antithrombotic therapy. Antithrombotic therapy is divided into platelet aggregation inhibitors and anticoagulation, both of which aim to prevent the formation of clots in the circulation. In both categories, there are several drugs that have their advantages and disadvantages depending on various conditions. Due to the numerous variations, we will not specify the drug itself but simplify the information and only indicate whether platelet aggregation inhibitors or anticoagulation is present. If a medication is recorded, the column will be converted to a 1, otherwise to a 0.
+
+NA´s will be assumed as no antithrombotic therapy and so will be converted to a 0.
+
+First, we will check the levels of the medication columns.
+
+```{r}
+
+# Display unique values for 'medication_anticoags' column
+unique_medication_anticoags <- levels(stroke_triage_data$medication_anticoags)
+print(unique_medication_anticoags)
+
+# Display unique values for 'medication_antiplatelets' column
+unique_medication_antiplatelets <- levels(stroke_triage_data$medication_antiplatelets)
+print(unique_medication_antiplatelets)
+
+```
+
+Aggregate the medication columns.
+
+```{r}
+
+# Convert logical values to integers for 'medication_anticoags' and 'medication_antiplatelets'
+stroke_triage_data$medication_anticoags <- as.integer(!is.na(stroke_triage_data$medication_anticoags))
+stroke_triage_data$medication_antiplatelets <- as.integer(!is.na(stroke_triage_data$medication_antiplatelets))
+
+# Convert to factors
+stroke_triage_data$medication_anticoags <- as.factor(stroke_triage_data$medication_anticoags)
+stroke_triage_data$medication_antiplatelets <- as.factor(stroke_triage_data$medication_antiplatelets)
+
+```
+
+Check levels again
+
+```{r}
+
+# Display unique values for 'medication_anticoags' column
+levels(stroke_triage_data$medication_anticoags)
+
+```
+
+```{r}
+
+# Display unique values for 'medication_antiplatelets' column
+levels(stroke_triage_data$medication_antiplatelets)
+
+```
+
+### Extract Pre-existing Neurological Deficit from "Other Neurological Findings"
+
+The decision to conduct an EVT is also influenced by the patient’s condition before the onset of stroke symptoms. Therefore, most elements of the “Other Neurological Findings” variable are redundant, as they are already incorporated into the 4I-SS or other variables. To reduce data complexity, we will transform the “Other Neurological Findings” variable into an “Pre-existing Neurological Deficit” variable. “Vorbestehendes neurolog. Defizit” will be coded as 1, while all other entries will be converted to 0.
+
+```{r}
+
+table(stroke_triage_data$other_neurological_findings)
+
+```
+
+**Convert**
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(pre_existing_neurological_deficit = ifelse(other_neurological_findings == "vorbestehendes neurolog. Defizit", 1, 0)) %>%
+  select(-other_neurological_findings)
+
+```
+
+**Time of Onset**
+
+Divide Time of Onset by 60 to convert it to hours and round to one decimal place.
+
+Limit the maximal TOO to 48 hours.
+
+```{r}
+
+stroke_triage_data$TOO <- round(stroke_triage_data$TOO / 60, 1)
+
+```
+
+## **Aggregate the Diagnosis of Discharge**
+
+To improve the reliability of our later conducted imputation and predictive models—especially for evaluating endovascular thrombectomy outcomes—we simplify the “Diagnosis of Discharge” variable by grouping similar diagnoses into three clinically relevant categories. This reduction minimizes issues with sparse data and focuses on clinically meaningful differences.
+
+We define the groups as follows:
+
+```         
+•   **Hemorrhagic:** Includes diagnoses associated with bleeding (i.e., “Bleeding”, “SAB”, “SDH”). These cases are generally not candidates for thrombectomy.
+
+•   **Ischemic:** Contains cases of “Stroke” and “TIA”, which represent ischemic events and are potential candidates for thrombectomy.
+
+•   **Differential Diagnosis:** Encompasses conditions that mimic stroke symptoms (i.e., “Stroke Mimic”, “TGA”, “Traumatic Brain Injury”), where the underlying pathology is not a true ischemic event.
+```
+
+Any other diagnoses will be categorized as “Other”.
+
+```{r}
+
+# stroke_triage_data <- stroke_triage_data %>%
+# mutate(diagnosis_discharge = case_when(
+#     diagnosis_discharge %in% c("Bleeding", "SAB", "SDH") ~ "Hemorrhagic",
+#     diagnosis_discharge %in% c("Stroke", "TIA") ~ "Ischemic",
+#     diagnosis_discharge %in% c("Stroke Mimic", "TGA", "Traumatic Brain Injury") ~ "Differential Diagnosis",
+#     TRUE ~ "Other"
+# ))
+
+```
+
+# Data Export of Raw Data for EDA
+
+**Write csv. for Exploratory Data Analysis before the Plausibility Check in another R File**
+
+```{r}
+
+write_csv(stroke_triage_data, here("Code",
+                                   "Exploratory Data Analysis",
+                                   "stroke_triage_data_raw.csv"))
+
+```
+
+# **Plausibility Checking**
+
+To improve the quality of the data, we will make a plausibility check where we think which values does not make sense in reality. Furthermore we will remove outliers in numerical variables.
+
+In addition to the following handling of the outliers, we will manually adjust some variables.
+
+**Age**
+
+The age should not be between 18 and 110 years. All values out of this range will be set to NaN.
+
+```{r}
+
+# Set implausible age values to NA
+stroke_triage_data$age[stroke_triage_data$age < 18 | stroke_triage_data$age > 110] <- NA
+
+```
+
+**Blood Pressure**
+
+Set blood pressure to an plausible range.
+
+Plausible Systolic Blood Pressure: 50 - 250 mmHg
+
+Plausible Diastolic Blood Pressure: 30 - 150 mmHg
+
+```{r}
+
+# Set implausible systolic blood pressure values to NA
+stroke_triage_data$bp_systolic[stroke_triage_data$bp_systolic < 50 | stroke_triage_data$bp_systolic > 250] <- NA
+
+# Set implausible diastolic blood pressure values to NA
+stroke_triage_data$bp_diastolic[stroke_triage_data$bp_diastolic < 30 | stroke_triage_data$bp_diastolic > 150] <- NA
+
+```
+
+**Heart Rate**
+
+Set heart rate to an plausible range.
+
+Plausible heart rate: 30 - 200 bpm
+
+```{r}
+
+# Set implausible heart rate values to NA
+stroke_triage_data$pulse[stroke_triage_data$pulse < 30 | stroke_triage_data$pulse > 200] <- NA
+
+```
+
+**Glucose Level**
+
+Set glucose level to an plausible range.
+
+Plausible glucose level: 10 - 500 mg/dl
+
+```{r}
+
+# Set implausible blood glucose levels to NA
+stroke_triage_data$blood_glucose[stroke_triage_data$blood_glucose < 10 | stroke_triage_data$blood_glucose > 500] <- NA
+
+
+```
+
+**Body Temperatur**
+
+Set body temperatur to an plausible range.
+
+Plausible glucose level: 25 - 44 °C
+
+```{r}
+
+# Set implausible body temperature readings to NA
+stroke_triage_data$temperature[stroke_triage_data$temperature < 25 | stroke_triage_data$temperature > 44] <- NA
+
+```
+
+**Glascow Coma Scale**
+
+Set glascow coma scale to an plausible range.
+
+Plausible glascow coma scale: 3 - 15
+
+```{r}
+
+# Set implausible Glasgow Coma Scale (GCS) total scores to NA
+stroke_triage_data$score_GCS[stroke_triage_data$score_GCS < 3 | stroke_triage_data$score_GCS > 15] <- NA
+
+# Set implausible GCS eye response scores to NA
+stroke_triage_data$GCS_eyes[stroke_triage_data$GCS_eyes < 1 | stroke_triage_data$GCS_eyes > 4] <- NA
+
+# Set implausible GCS motor response scores to NA
+stroke_triage_data$GCS_motor[stroke_triage_data$GCS_motor < 1 | stroke_triage_data$GCS_motor > 6] <- NA
+
+# Set implausible GCS verbal response scores to NA
+stroke_triage_data$GCS_verbal[stroke_triage_data$GCS_verbal < 1 | stroke_triage_data$GCS_verbal > 5] <- NA
+
+```
+
+**Limit DTN and DTCT to 100 Minutes**
+
+Even if the observations are valid, it would probably lower the model performance.
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(DTN = if_else(DTN > 100, NA_real_, DTN),
+         DTCT = if_else(DTCT > 100, NA_real_, DTCT))
+
+```
+
+**Time of Onset**
+
+Limit the maximal TOO to 48 hours.
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(TOO = if_else(TOO > 48, NA_real_, TOO))
+
+```
+
+**Categorical columns**
+
+Check the levels of the categorical columns and then delete the wrong entries.
+
+```{r}
+
+# Select only categorical columns
+categorical_variables <- stroke_triage_data %>% select(where(is.factor))
+
+# Apply the unique() function to each column and print the results
+for (column in names(categorical_variables)) {
+  unique_values <- unique(categorical_variables[[column]])
+  cat("Unique elements in '", column, "': ", toString(unique_values), "\n")
+}
+
+```
+
+-\> Categorical Entries seem to be plausible. We will aggregate them later and check for plausibility in more detail.
+
+## Write csv. for Feature Selection in another R File
+
+```{r}
+
+write_csv(stroke_triage_data, "data_manipulation_3_mlpreprocessing.csv")
+
+```

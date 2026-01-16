@@ -1,0 +1,881 @@
+---
+title: "Imputation"
+format: html
+editor: visual
+---
+
+**Load Libraries**
+
+```{r}
+
+# Project-relative paths & file management
+library(here) 
+
+# Data Manipulation
+library(tidyverse)
+
+# Missing Data Analysis 
+library(ggmice)
+
+# Preprocessing
+library(caret) # for scaling
+
+# Imputation like in Tidymodels
+library(recipes)
+
+# Graphs
+library(gridExtra) # for arranging plots
+library(paletteer) # for graph colours
+library(cowplot) # legends for arranged plots
+library(rcartocolor) 
+
+```
+
+**Load Data as a tibble**
+
+```{r}
+
+stroke_triage_data <- read_csv(here("Code",
+                                    "Data Preprocessing",
+                                    "data_manipulation_4_UFS",
+                                    "data_manipulation_4_UFS_for_imputataion.csv"))
+
+```
+
+## Missing Data Analysis
+
+**Missing Table**
+
+```{r}
+
+# Calculate the missing rate for each variable
+stroke_triage_data %>%
+  summarise(across(everything(), ~ round(sum(is.na(.)) / length(.) * 100, 2))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing_rate") %>%
+  arrange(desc(missing_rate))
+
+```
+
+**Influx and Outflux**
+
+The `plot_flux()` function generates an influx-outflux plot.
+
+-   **Influx** quantifies how well the missing data of a variable connect to the observed data of other variables. Variables with high influx values are great candidates for imputation because their missing data can be well explained by the observed data of other variables.
+
+-   **Outflux** quantifies how well the observed data of a variable connect to the missing data of other variables. Variables with high outflux values are valuable predictors in the imputation process as their observed data can effectively explain the missing data of other variables.
+
+In general, higher influx (leftward) and higher outflux (downward) values are desirable for building effective imputation models. The plotting function requires an incomplete dataset (provided as the argument `data`) and includes optional parameters to adjust the legend and axis labels.
+
+```{r}
+
+# select variablenames of interest
+
+variables_of_interest <- stroke_triage_data %>% 
+  select("gender",
+          "age",
+          "pulse",
+          "blood_glucose",
+          "score_4ISS",
+          "EVT")
+
+
+# Plot with the filtered variables
+ggmice::plot_flux(variables_of_interest,
+                  label = FALSE,
+                  caption = FALSE)
+
+```
+
+## Preprocessing for Imputation
+
+**Exclude target variable**
+
+The target variable (label) is excluded from the dataset before imputation, because the target variable should not be imputed.
+
+```{r}
+
+# Define the target variable (label)
+label_var <- "EVT"
+
+# Remove the target variable from the dataset and save it separately
+label_data <- stroke_triage_data[[label_var]]
+stroke_triage_data <- stroke_triage_data[ , !(names(stroke_triage_data) %in% label_var)]
+ 
+```
+
+# Imputation Simulation Environment
+
+There is no general recommendation in the literature on which imputation technique to use in machine learning preprocessing. Therefore, we will test to determine which imputation method is likely the best fit for our data. To achieve this, we will follow three steps:
+
+1.  **Data Preparation**
+
+**Artificial Missing Value Insertion:**
+
+We begin with our complete dataset (*stroke_triage_data*) and artificially insert 50 missing values into selected key variables. The indices of these entries, along with their original values, are stored for later evaluation.
+
+Important variables for our imputation evaluation are:
+
+-   **Continuous:** `blood_glucose`, `temperature`, `TOO`
+
+-   **Binary:** `pupil_reaction_abnormal`, `consciousness_impaired`, `gender`, `hemiparesis_4ISS`
+
+**Reverse Scaling Function:**
+
+Because some imputation methods (such as kNN) require scaled data, we scale our dataset using a Min–Max transformation via caret’s `preProcess` function. A custom function (reverse_scaling) is then defined to convert the imputed, scaled values back to their original scale, ensuring that the imputed values can be directly compared to the original ones.
+
+**Scaling the Data for Imputation:**
+
+The data is scaled using the previously created preProcess object. This step is crucial for distance-based imputation methods like kNN.
+
+2.  **Apply Different Imputation Methods:**
+
+We define multiple recipes to apply different imputation techniques on the scaled data:
+
+• **Min/Mode Imputation:** Numeric variables with the median, categorical variables with mode.
+
+• **kNN Imputation with k = 1:** Imputation using one nearest neighbor.
+
+• **kNN Imputation with k = 5:** Imputation using five nearest neighbors.
+
+• **Bagged Trees Imputation:** Imputation using an ensemble of bagged trees.
+
+Each recipe is prepped (trained on the data) and then baked (applied to the data) to produce a complete, imputed dataset.
+
+3.  **Evaluation of Imputation Methods:**
+
+Finally, the imputed values (after reversing any scaling) can be compared with the stored original values for the artificially removed entries. This comparison is done using appropriate performance metrics, providing insight into which imputation method best preserves the original data characteristics.
+
+## 1. Data Preparation
+
+### Set Variable Types
+
+We create a function because the data types need to be converted multiple times in this file, especially after imputation, to ensure consistency.
+
+```{r}
+
+# Define a function to convert columns to factors as specified
+set_datatypes <- function(df) {
+  df %>% 
+    mutate(
+      gender                            = as.factor(gender),
+      vigilance_4ISS                    = as.factor(vigilance_4ISS),
+      gaze_head_deviation_4ISS          = as.factor(gaze_head_deviation_4ISS),
+      hemiparesis_4ISS                  = as.factor(hemiparesis_4ISS),
+      aphasia_dysarthria_4ISS           = as.factor(aphasia_dysarthria_4ISS),
+      pupil_reaction_abnormal           = as.factor(pupil_reaction_abnormal),
+      consciousness_impaired            = as.factor(consciousness_impaired),
+      exclusion_TOO                     = as.factor(exclusion_TOO),
+      exclusion_anticoag_status         = as.factor(exclusion_anticoag_status),
+      medication_anticoags              = as.factor(medication_anticoags),
+      medication_antiplatelets          = as.factor(medication_antiplatelets),
+      pre_existing_neurological_deficit = as.factor(pre_existing_neurological_deficit),
+      diagnosis_discharge               = as.factor(diagnosis_discharge)
+    )
+}
+
+```
+
+Set Variable Types to `stroke_triage_data`
+
+```{r}
+
+stroke_triage_data <- set_datatypes(stroke_triage_data)
+
+```
+
+### Artificial Missing Value Insertion
+
+We start by creating a working copy of the dataset and then randomly inserting a fixed number of missing values into selected variables. The indices and original values are stored so that they can assess the imputation quality later.
+
+```{r}
+
+# save the dataframe for artificial missing values in another variable
+data_for_imputation <- stroke_triage_data
+
+# Define the variables for which we want to test imputation performance:
+continuous_vars <- c("blood_glucose",
+                     "temperature",
+                     "TOO")
+
+binary_vars <- c("pupil_reaction_abnormal",
+                 "consciousness_impaired",
+                 "gender",
+                 "hemiparesis_4ISS")
+
+vars_to_check <- c(continuous_vars, binary_vars)
+
+# Record original NA counts from the original dataset (stroke_triage_data)
+original_na_counts <- sapply(vars_to_check, function(v) sum(is.na(stroke_triage_data[[v]])))
+
+# Insert artificial missing values into data_for_imputation
+
+set.seed(456) 
+
+# Prepare lists to store indices and original values for later evaluation:
+artificial_missing_indices <- list()
+original_values <- list()
+num_artificial_missing <- 100  # Number of artificial missing values per variable
+
+# Insert missing values for continuous variables:
+for (var in continuous_vars) {
+  available_idx <- which(!is.na(data_for_imputation[[var]]))
+  sel_idx <- sample(available_idx, min(num_artificial_missing, length(available_idx)))
+  artificial_missing_indices[[var]] <- sel_idx
+  original_values[[var]] <- data_for_imputation[[var]][sel_idx]
+  data_for_imputation[[var]][sel_idx] <- NA
+}
+
+# Insert missing values for binary variables:
+for (var in binary_vars) {
+  available_idx <- which(!is.na(data_for_imputation[[var]]))
+  sel_idx <- sample(available_idx, min(num_artificial_missing, length(available_idx)))
+  artificial_missing_indices[[var]] <- sel_idx
+  original_values[[var]] <- data_for_imputation[[var]][sel_idx]
+  data_for_imputation[[var]][sel_idx] <- NA
+}
+
+```
+
+**Check Artificial NA´ Insertions**
+
+The following two code chunks verify that the artificial missing value insertions were applied correctly:
+
+-   **Code Chunk 1:** Compares the number of missing values in the dataset before and after insertion to ensure that the expected additional NAs are present.
+
+-   **Code Chunk 2:** Retrieves the indices where NAs were inserted and displays a table showing the original values alongside the corresponding NA entries.
+
+```{r}
+
+# Compute new NA counts from data_for_imputation
+new_na_counts <- sapply(vars_to_check,
+                        function(v) sum(is.na(data_for_imputation[[v]])))
+
+missing_values_summary <- tibble(
+  Variable = vars_to_check,
+  Original_NA_Count = original_na_counts,
+  After_Insertation_NA_Count = new_na_counts,
+  Artificially_Inserted = sapply(vars_to_check, function(v) length(artificial_missing_indices[[v]]))
+) %>%
+  mutate(Expected_New_Count = Original_NA_Count + Artificially_Inserted,
+         Insertion_OK = (After_Insertation_NA_Count == Expected_New_Count))
+
+print(missing_values_summary)
+
+```
+
+```{r}
+
+na_details_list <- lapply(vars_to_check, function(v) {
+  indices <- artificial_missing_indices[[v]]
+  tibble(
+    Variable = v,
+    Row_Index = indices,
+    Original_Value = as.character(original_values[[v]]),
+    Current_Value = as.character(data_for_imputation[[v]][indices])
+  )
+})
+
+na_details <- bind_rows(na_details_list)
+print(na_details)
+
+```
+
+### Scale the Data for Imputation
+
+**Scale the Data for Imputation**
+
+Especially **kNN-Imputation** needs scaled data
+
+```{r}
+
+# Create a preProcess object with the method 'range' for Min-Max scaling
+preProcValues <- caret::preProcess(data_for_imputation,
+                                   method = c("range"))
+
+# Apply the transformation to the data
+data_for_imputation_scaled <- predict(preProcValues,
+                                      data_for_imputation)
+
+```
+
+**Write Custom Rescale Function**
+
+There is no built-in caret function for rescaling the values, so we create a custom function for rescaling based on **`preProcValues`**.
+
+```{r}
+
+# Function for rescaling based on preProcValues
+reverse_scaling <- function(scaled_data, preProcValues) {
+  # Loop through each column in the scaled data
+  for (col in colnames(scaled_data)) {
+    # Check if the column exists in the preProcValues ranges
+    if (col %in% colnames(preProcValues$ranges)) {
+      # Extract the min and max values from preProcValues for the current column
+      min_val <- preProcValues$ranges[1, col]
+      max_val <- preProcValues$ranges[2, col]
+      
+      # Ensure the min and max values are numeric
+      if (is.numeric(min_val) && is.numeric(max_val)) {
+        # Rescale the data for the current column
+        scaled_data[[col]] <- scaled_data[[col]] * (max_val - min_val) + min_val
+      }
+    }
+  }
+  
+  # Return the rescaled data as a data frame
+  return(as.data.frame(scaled_data))
+}
+
+```
+
+## 2. Apply Different Imputation Methods
+
+### Create Recipe
+
+```{r}
+
+# Min/Mode Imputation: 
+# Numeric variables are imputed with the median, categorical variables with the mode
+recipe_min_mode <- recipe(~ ., data = data_for_imputation_scaled) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors())
+
+# kNN Imputation with k = 1
+recipe_knn1 <- recipe(~ ., data = data_for_imputation_scaled) %>%
+  step_impute_knn(all_predictors(), neighbors = 1)
+
+# kNN Imputation with k = 5
+recipe_knn5 <- recipe(~ ., data = data_for_imputation_scaled) %>%
+  step_impute_knn(all_predictors(), neighbors = 5)
+
+# Bagged Trees Imputation
+recipe_bagged <- recipe(~ ., data = data_for_imputation_scaled) %>%
+  step_impute_bag(all_predictors())
+
+```
+
+**Bake**
+
+```{r}
+
+# Min/Mode Imputation: 
+prep_min_mode <- prep(recipe_min_mode, training = data_for_imputation_scaled)
+imputed_min_mode_scaled <- bake(prep_min_mode, new_data = data_for_imputation_scaled)
+
+# kNN Imputation with k = 1
+prep_knn1 <- prep(recipe_knn1, training = data_for_imputation_scaled)
+imputed_knn1_scaled <- bake(prep_knn1, new_data = data_for_imputation_scaled)
+
+# kNN Imputation with k = 5
+prep_knn5 <- prep(recipe_knn5, training = data_for_imputation_scaled)
+imputed_knn5_scaled <- bake(prep_knn5, new_data = data_for_imputation_scaled)
+
+# Bagged Trees Imputation
+prep_bagged <- prep(recipe_bagged, training = data_for_imputation_scaled)
+imputed_bagged_scaled <- bake(prep_bagged, new_data = data_for_imputation_scaled)
+
+```
+
+### Rescale and Round the Imputed Values
+
+**Rescale the Data**
+
+```{r}
+
+# Rescale the imputed datasets back to their original scale
+imputed_data_min_mode <- reverse_scaling(imputed_min_mode_scaled, preProcValues)
+imputed_data_knn1 <-     reverse_scaling(imputed_knn1_scaled, preProcValues)
+imputed_data_knn5 <-     reverse_scaling(imputed_knn5_scaled, preProcValues)
+imputed_data_bagged <-   reverse_scaling(imputed_bagged_scaled, preProcValues)
+
+# Convert Dataframe to tibble
+imputed_data_min_mode <- as_tibble(imputed_data_min_mode)
+imputed_data_knn1 <-     as_tibble(imputed_data_knn1)
+imputed_data_knn5 <-     as_tibble(imputed_data_knn5)
+imputed_data_bagged <-   as_tibble(imputed_data_bagged)
+
+```
+
+**Round Imputed Values**
+
+The imputed values often contain multiple decimal places. However, in the original data, only the 'temperature' and 'TOO' variables have one decimal place, while all other variables are recorded as whole numbers. Variables will be rounded to their original state.
+
+**Factors need to be converted to numeric, otherwise `round()`** does not work.
+
+```{r}
+
+# Function to convert all factor columns to numeric
+convert_factors_to_numeric <- function(df) {df %>%
+    mutate(across(where(is.factor), ~ as.numeric(as.character(.))))
+}
+
+# Apply the conversion to all imputed datasets
+imputed_data_min_mode <- convert_factors_to_numeric(imputed_data_min_mode)
+imputed_data_knn1     <- convert_factors_to_numeric(imputed_data_knn1)
+imputed_data_knn5     <- convert_factors_to_numeric(imputed_data_knn5)
+imputed_data_bagged   <- convert_factors_to_numeric(imputed_data_bagged)
+
+```
+
+**Round the imputed values**
+
+```{r}
+
+# Function to round values in the dataset
+round_imputed_data <- function(df) {
+  df <- df %>%
+    mutate(across(-c(temperature, TOO), round),  # Round all numeric columns to integers except temperature and TOO
+           across(c(temperature, TOO), ~ round(., 1)))  # Round temperature and TOO to one decimal place
+  return(df)
+}
+
+# Apply the function to all imputed datasets
+imputed_data_min_mode <- round_imputed_data(imputed_data_min_mode)
+imputed_data_knn1 <- round_imputed_data(imputed_data_knn1)
+imputed_data_knn5 <- round_imputed_data(imputed_data_knn5)
+imputed_data_bagged <- round_imputed_data(imputed_data_bagged)
+
+```
+
+Set datatypes again with the created `set_datatypes()` function, because after imputation all factor variables are now set as numerical variables.
+
+```{r}
+
+imputed_data_min_mode <- set_datatypes(imputed_data_min_mode)
+imputed_data_knn1     <- set_datatypes(imputed_data_knn1)
+imputed_data_knn5     <- set_datatypes(imputed_data_knn5)
+imputed_data_bagged   <- set_datatypes(imputed_data_bagged)
+
+```
+
+**Check Imputed Data**
+
+```{r}
+
+# For comparison: Display the first few rows of the imputed datasets
+head(data_for_imputation)
+head(imputed_data_min_mode)
+head(imputed_data_knn1)
+head(imputed_data_knn5)
+head(imputed_data_bagged)
+
+```
+
+## 3. Evaluate Imputation
+
+### Compare Distributions
+
+1.  **Combine Datasets with Labels to Display "Mean", not "Mode" in the Plots**
+
+```{r}
+
+# Add a label to each dataset.
+data_for_imputation$dataset         <- "Original"
+imputed_data_min_mode$dataset       <- "Mean"
+imputed_data_knn1$dataset           <- "1NN"
+imputed_data_knn5$dataset           <- "5NN"
+imputed_data_bagged$dataset         <- "Bagged"
+
+# Combine all datasets into one data frame.
+combined_data <- bind_rows(
+  data_for_imputation,
+  imputed_data_min_mode,
+  imputed_data_knn1,
+  imputed_data_knn5,
+  imputed_data_bagged)
+
+# Set the correct order
+combined_data$dataset <- factor(
+  combined_data$dataset,
+  levels = c("Original", "Mean", "1NN", "5NN", "Bagged")
+)
+
+```
+
+2.  **Compare Continuous Variables (Density and Box Plots)**
+
+```{r}
+
+# Define continuous variables and user-friendly labels.
+relevant_continuous_vars <- c("bp_systolic", "bp_diastolic", "pulse", "blood_glucose", "TOO", "temperature")
+
+# Create a named vector for user-friendly variable names with missing rate
+var_labels <- c(
+  bp_systolic = "Systolic Blood Pressure",
+  bp_diastolic = "Diastolic Blood Pressure",
+  pulse = "Pulse",
+  blood_glucose = "Blood Glucose",
+  TOO = "Time of Onset",
+  temperature = "Body Temperature"
+)
+
+# Define a consistent color mapping for datasets.
+library(rcartocolor)
+  color_palette <- rcartocolor::carto_pal(6, "Antique")
+color_mapping <- c(
+  "Original"  = color_palette[3],
+  "Mean"      = color_palette[5],
+  "1NN"       = color_palette[2],
+  "5NN"       = color_palette[4],
+  "Bagged"    = color_palette[1])
+
+```
+
+#### Continuous Variables (Density- and Boxplots)
+
+**Density Plots**
+
+```{r}
+
+density_plots <- list()
+for (var in relevant_continuous_vars) {
+  label <- var_labels[var]
+  p <- ggplot(combined_data, aes_string(x = var, color = "dataset")) +
+    geom_density(size = 1) +
+    scale_color_manual(values = color_mapping) +
+    labs(x = label, y = "Density") +
+    theme_minimal() +
+    theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+  density_plots[[var]] <- p
+}
+combined_density_plot <- plot_grid(plotlist = density_plots, ncol = 2)
+print(combined_density_plot)
+
+```
+
+**Boxplots**
+
+```{r}
+
+boxplot_plots <- list()
+for (var in relevant_continuous_vars) {
+  label <- var_labels[var]
+  p <- ggplot(combined_data, aes(x = dataset, y = .data[[var]], color = dataset)) +
+    geom_boxplot() +
+    scale_color_manual(values = color_mapping) +
+    labs(title = label, x = "", y = "") +
+    theme_minimal() +
+    theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+  boxplot_plots[[var]] <- p
+}
+combined_boxplot <- plot_grid(plotlist = boxplot_plots, ncol = 2)
+print(combined_boxplot)
+
+```
+
+**Scatterplots**
+
+```{r}
+
+# Variables to be plotted
+relevant_continuous_vars <- c("TOO", "temperature")
+
+# Loop to create a combined plot (boxplot + jitter) for each variable
+library(ggplot2)
+library(cowplot)
+
+combined_plots <- list()
+
+for (var in relevant_continuous_vars) {
+  
+  # Label from var_labels; otherwise just use var as the title
+  label <- if (exists("var_labels")) var_labels[var] else var
+  
+  # Temperature scale in steps of 0.5, if "temperature"
+  y_scale <- scale_y_continuous()
+  if (var == "temperature") {
+    y_scale <- scale_y_continuous(
+      breaks = seq(
+        floor(min(combined_data[[var]], na.rm = TRUE)),
+        ceiling(max(combined_data[[var]], na.rm = TRUE)),
+        by = 0.5
+      )
+    )
+  }
+  
+  p <- ggplot(combined_data, aes_string(x = "dataset", y = var, color = "dataset")) +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 0.7) +
+    geom_boxplot(outlier.shape = NA, alpha = 1, width = 0.3) +
+    scale_color_manual(name = NULL, values = color_mapping) +
+    labs(x = "", y = "", title = label) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    y_scale
+  
+  combined_plots[[var]] <- p
+}
+
+# Extract shared legend
+legend <- cowplot::get_legend(
+  ggplot(combined_data, aes(x = dataset, y = temperature, color = dataset)) +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 0.7) +
+    geom_boxplot(outlier.shape = NA, alpha = 1, width = 0.3) +
+    scale_color_manual(name = NULL, values = color_mapping) +  # Here also name = NULL
+    theme(legend.position = "right")
+)
+
+# Arrange the two plots side by side
+combined_grid <- plot_grid(plotlist = combined_plots, ncol = 2)
+
+# Place the legend to the right
+final_plot <- plot_grid(combined_grid, legend, rel_widths = c(1, 0.2))
+
+# Print plot
+print(final_plot)
+
+```
+
+#### Binary Variables (Bar Charts)
+
+**Combine Datasets with Labels to Display "Mode", not "Mean" in the Plots**
+
+```{r}
+
+# Add a dataset label to each dataset.
+data_for_imputation$dataset         <- "Original"
+imputed_data_min_mode$dataset       <- "Mode"
+imputed_data_knn1$dataset           <- "1NN"
+imputed_data_knn5$dataset           <- "5NN"
+imputed_data_bagged$dataset         <- "Bagged"
+
+# Combine all datasets into one data frame.
+combined_data <- bind_rows(
+  data_for_imputation,
+  imputed_data_min_mode,
+  imputed_data_knn1,
+  imputed_data_knn5,
+  imputed_data_bagged)
+
+# Wunsch-Reihenfolge für die Faktorstufen festlegen
+combined_data$dataset <- factor(
+  combined_data$dataset,
+  levels = c("Original", "Mode", "1NN", "5NN", "Bagged")
+)
+
+```
+
+Select and name binary variables
+
+```{r}
+
+# These variables should also be present in the combined dataset.
+relevant_binary_vars <- c("gender", "pre_existing_neurological_deficit", 
+                          "pupil_reaction_abnormal", "consciousness_impaired")
+
+# Descriptive labels that can, for example, also indicate the proportion of missing values
+binary_var_labels <- c(
+  gender = "Gender",
+  pre_existing_neurological_deficit = "Neurological Deficit",
+  pupil_reaction_abnormal = "Abnormal Pupil Reaction",
+  consciousness_impaired = "Impaired Consciousness"
+)
+
+```
+
+```{r}
+
+# calcualte percentages for the barcharts
+calculate_percentages <- function(data, var, group) {
+  data %>%
+    filter(!is.na(get(var))) %>%  
+    group_by_at(group) %>%
+    summarise(
+      Count = sum(as.numeric(as.character(get(var))), na.rm = TRUE), 
+      Total = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(Percentage = Count / Total)
+}
+
+```
+
+```{r}
+
+# Initialize an empty list to store the plots
+binary_plots <- list()
+
+# Create percentage bar plots for binary variables
+for (i in seq_along(relevant_binary_vars)) {
+  var <- relevant_binary_vars[i]  # Get the current variable name
+  label <- binary_var_labels[var]  # Get the user-friendly label for the current variable
+  
+  # Calculate percentages
+  percentages <- calculate_percentages(combined_data, var, "dataset")
+  
+  p <- ggplot(percentages, aes_string(x = "dataset", y = "Percentage", fill = "dataset")) + 
+    geom_bar(stat = "identity", position = "dodge") +  # Create bar plot with dodged bars for each dataset
+    scale_y_continuous(labels = scales::percent_format()) +  # Format y-axis as percentages
+    scale_fill_manual(values = color_mapping) +  # Use defined color mapping
+    labs(x = NULL, y = "") +  # Remove x-axis label and leave y-axis label empty
+    theme_minimal() +  # Apply minimal theme
+    theme(legend.position = "none",  # Remove legend from individual plots
+          legend.title = element_blank(),  # Remove legend title
+          plot.title = element_text(hjust = 0.5)) +  # Center the plot title
+    ggtitle(label)  # Set the plot title to the user-friendly label
+  
+  binary_plots[[i]] <- p  # Add the current plot to the list of plots
+}
+
+# Extract the legend from one plot using an existing binary variable (e.g. "gender")
+binary_legend <- cowplot::get_legend(
+  ggplot(calculate_percentages(combined_data, "gender", "dataset"), aes(x = dataset, y = Percentage, fill = dataset)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_y_continuous(labels = scales::percent_format()) +
+    scale_fill_manual(values = color_mapping) +
+    theme(legend.position = "top", legend.title = element_blank())
+)
+
+# Arrange the plots in a grid layout
+combined_plot_binary <- plot_grid(plotlist = binary_plots, ncol = 2)
+
+# Add the legend to the grid
+final_plot_binary <- plot_grid(combined_plot_binary, binary_legend, ncol = 1, rel_heights = c(1, 0.1))
+
+# Print the final plot
+print(final_plot_binary)
+
+```
+
+### Compare Numerically
+
+**Continuous Imputations**
+
+```{r}
+
+continuous_vars <- c("blood_glucose", "temperature", "TOO")
+
+# RMSE helper function
+compute_rmse <- function(true, pred) {
+  sqrt(mean((pred - true)^2, na.rm = TRUE))
+}
+
+# Function to compute RMSE for a single variable
+calc_rmse_by_var <- function(imputed_data, var) {
+  true_vals <- original_values[[var]]
+  pred_vals <- imputed_data[[var]][ artificial_missing_indices[[var]] ]
+  compute_rmse(true_vals, pred_vals)
+}
+
+# Create a compact RMSE table with one row per variable
+# and columns for the different imputation methods:
+continuous_results <- tibble(
+  Variable         = continuous_vars,
+  Mean_Mode_RMSE   = map_dbl(continuous_vars, ~ calc_rmse_by_var(imputed_data_min_mode, .x)),
+  kNN1_RMSE        = map_dbl(continuous_vars, ~ calc_rmse_by_var(imputed_data_knn1, .x)),
+  kNN5_RMSE        = map_dbl(continuous_vars, ~ calc_rmse_by_var(imputed_data_knn5, .x)),
+  Bagged_RMSE      = map_dbl(continuous_vars, ~ calc_rmse_by_var(imputed_data_bagged, .x))
+)
+
+# Simply return/show the table (no need for print("..."))
+continuous_results
+
+```
+
+**Binary Imputations**
+
+```{r}
+
+print_confusion_matrices_for_binary_var <- function(
+  var, 
+  original_values, 
+  artificial_missing_indices, 
+  methods_list
+) {
+  # Heading
+  cat("## Confusion Matrices für Variable:", var, "\n\n")
+  
+  # True values at the artificially missing indices
+  true_vals <- original_values[[var]]
+  
+  # Loop over all imputation methods
+  for(method_name in names(methods_list)) {
+    cat("### Methode:", method_name, "\n\n")
+    
+    method_data <- methods_list[[method_name]]
+    pred_vals <- method_data[[var]][ artificial_missing_indices[[var]] ]
+    
+    # Common levels for true and predicted values
+    common_levels <- sort(unique(c(true_vals, pred_vals)))
+    true_factor <- factor(true_vals, levels = common_levels)
+    pred_factor <- factor(pred_vals, levels = common_levels)
+    
+    # Confusion matrix with caret
+    cm <- confusionMatrix(pred_factor, true_factor)
+    print(cm)
+    
+    # Blank line after each method
+    cat("\n")
+  }
+}
+
+```
+
+```{r}
+
+methods_list <- list(
+  "Mode"   = imputed_data_min_mode,
+  "kNN1"   = imputed_data_knn1,
+  "kNN5"   = imputed_data_knn5,
+  "Bagged" = imputed_data_bagged
+)
+
+```
+
+**Pupil Reaction (Confusion Matrix and Statistics)**
+
+```{r}
+
+# Code-Chunk 1: pupil_reaction_abnormal
+print_confusion_matrices_for_binary_var(
+  var                      = "pupil_reaction_abnormal",
+  original_values          = original_values,
+  artificial_missing_indices = artificial_missing_indices,
+  methods_list             = methods_list
+)
+
+```
+
+**Impaired Consciousness (Confusion Matrix and Statistics)**
+
+```{r}
+
+# Code-Chunk 2: consciousness_impaired
+print_confusion_matrices_for_binary_var(
+  var                      = "consciousness_impaired",
+  original_values          = original_values,
+  artificial_missing_indices = artificial_missing_indices,
+  methods_list             = methods_list
+)
+
+```
+
+**Gender (Confusion Matrix and Statistics)**
+
+```{r}
+
+# Code-Chunk 3: gender
+print_confusion_matrices_for_binary_var(
+  var                      = "gender",
+  original_values          = original_values,
+  artificial_missing_indices = artificial_missing_indices,
+  methods_list             = methods_list
+)
+
+```
+
+**4I-SS Hemiparesis (Confusion Matrix and Statistics)**
+
+```{r}
+
+# Code-Chunk 4: hemiparesis_4ISS
+print_confusion_matrices_for_binary_var(
+  var                      = "hemiparesis_4ISS",
+  original_values          = original_values,
+  artificial_missing_indices = artificial_missing_indices,
+  methods_list             = methods_list
+)
+
+```

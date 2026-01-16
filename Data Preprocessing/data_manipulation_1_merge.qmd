@@ -1,0 +1,878 @@
+---
+title: "Data Manipulaion 1: Record Linkage of EMS and Clinical Data"
+format: html
+editor: visual
+---
+
+# Data Preparation
+
+**Load Libraries and Data**
+
+```{r}
+
+library(here)       # paths & file management
+library(tidyverse)  # data manipulation
+library(lubridate)  # date manipulation
+library(crosstable) # crosstables
+library(flextable)  # editing tables
+
+```
+
+```{r include = FALSE}
+
+# Load EMS data
+ems_data <- read_csv(here("Data", "ems_data_original.csv"))
+
+# Load clinical data
+clinical_data <- read_csv(here("Data", "stroke_angel_data_all.csv"))
+
+```
+
+**Have a look on the data**
+
+```{r}
+
+ems_data %>% sample_n(10) %>% print_DT()
+
+clinical_data %>% sample_n(10) %>% print_DT()
+
+```
+
+**Convert Class to Date Format**
+
+We want to combine the two dataframes with the arrival dates and times of the EMS.
+
+The clinical data contains the information in the column "a-zeit" for the date and time in one time stamp with the format "YYYY-MM-DD HH:MM:SS".
+
+The EMS data contains the information in the column "ankunftszeit_laut_voranmeldung" for the date and time in one time stamp with the format "YYYY-MM-DD HH:MM:SS".
+
+First, we want to convert the column class to the same lubridate time format and keep the international standard ISO 8610 for dates that has the format YYYY-MM-DD HH:MM:SS.
+
+This specific format is in R called POSIXct (R is not sure and just gives as a class "POSIXct" or "POSIXt", to be on the safe side).
+
+```{r}
+
+# convert class in ems data
+ems_data <- ems_data %>% 
+  mutate(ankunftszeit_laut_voranmeldung = ymd_hms(ankunftszeit_laut_voranmeldung))
+
+# test class
+class(ems_data$ankunftszeit_laut_voranmeldung)
+
+```
+
+In clinical_data data, we do not have one timestamp for the arrival time but it is seperat available in the columns `a_dat` and `a_zeit`.
+
+We will combine those columns and get a timestamp in the new column `ankunft_timestamp`.
+
+```{r}
+
+# convert class in clincial data
+clinical_data <- clinical_data %>%
+  mutate(ankunft_timestamp = paste(as.character(a_dat), as.character(a_zeit))) %>% 
+  mutate(ankunft_timestamp = as.POSIXct(ankunft_timestamp,
+                                        format = "%m/%d/%Y %H:%M:%S")) %>% # delete the old two columns
+  select(-a_dat, -a_zeit)
+
+# Force timezone to "UTC"
+clinical_data$ankunft_timestamp <- force_tz(clinical_data$ankunft_timestamp,
+                                            tzone = "UTC")
+
+# test class
+class(clinical_data$ankunft_timestamp)
+
+```
+
+**Round Age in EMS Data**
+
+The age information in the ems_data is not an integer due to query reasons.
+
+```{r}
+
+ems_data %>% select(alter) %>% head(5) %>% print_DT()
+
+```
+
+Age in the EMS dataset is rounded to reduce granularity. This enhances the likelihood of successfully matching with the clinical dataset, as slight variations in age documentation could occur.
+
+```{r}
+
+# convert ems_data$alter as numeric
+
+ems_data$alter <- as.numeric(ems_data$alter)
+
+# round ems_data$alter. We use here floor, because we need to round down. A person who is 80.99 years old is still 80. 
+
+ems_data$alter <- floor(ems_data$alter)
+
+```
+
+```{r}
+
+ems_data %>% select(alter) %>% head(5) %>% print_DT()
+
+```
+
+**Rename Columns**
+
+We rename relevant columns in both datasets for clarity and to ensure similar variables across datasets are easily identifiable.
+
+```{r}
+
+# rename columns in ems_data
+
+ems_data <- ems_data %>%
+  rename(
+    alter_laut_ems = alter
+  )
+
+clinical_data <- clinical_data %>%
+  rename(
+    alter_laut_klinik = alt,
+    ankunftszeit_laut_klinik = ankunft_timestamp
+  )
+
+```
+
+**Convert NULL to NA**
+
+All occurrences of "NULL" in character columns are converted to `NA`. This standardizes the representation of missing values across datasets, simplifying further data manipulation.
+
+```{r}
+
+# Replace all "NULL" entries with NA in ems_data
+ems_data <- lapply(ems_data, function(x) {
+    if(is.character(x)) {
+        x[x == "NULL"] <- NA
+    }
+    return(x)
+})
+
+# Convert the list back to a dataframe
+ems_data <- as.data.frame(ems_data)
+
+```
+
+**Ensure Age Rage from 18 - 100**
+
+```{r}
+
+# Filter age range for EMS and Clinic datasets
+ems_data <- ems_data %>%
+  mutate(alter_laut_ems = ifelse(alter_laut_ems < 18 | alter_laut_ems > 100,
+                                 NA,
+                                 alter_laut_ems))
+
+clinical_data <- clinical_data %>%
+  mutate(alter_laut_klinik = ifelse(alter_laut_klinik < 18 | alter_laut_klinik > 100,
+                                    NA,
+                                    alter_laut_klinik))
+
+```
+
+## Remove not Overlapping Clinical Data
+
+Records from the datasets that do not make sense to be linked to the counterpart, will be removed in advance to further prevent mismatching.
+
+### EMS Records Outside Clinical Data Time Window
+
+Entries in the EMS dataset that do not fall within the time range of the Clinical dataset are removed. This step ensures that only potentially matchable data is retained, optimizing the matching process.
+
+```{r}
+  
+# Count total entries before filtering
+total_entries_before <- nrow(ems_data)
+
+# Delete all NA´s
+ems_data <- ems_data[!is.na(ems_data$ankunftszeit_laut_voranmeldung), ]
+clinical_data <- clinical_data[!is.na(clinical_data$ankunftszeit_laut_klinik), ]
+
+# Use lubridate::floor_date to round the timestamp
+ems_data$ankunftszeit_rounded <- floor_date(ems_data$ankunftszeit_laut_voranmeldung, "hour")
+
+clinical_data$ankunftszeit_laut_klinik_rounded <- floor_date(clinical_data$ankunftszeit_laut_klinik, "hour")
+
+# time-window of available clinic data
+min_clinical_time <- min(clinical_data$ankunftszeit_laut_klinik, na.rm = TRUE)
+max_clinical_time <- max(clinical_data$ankunftszeit_laut_klinik, na.rm = TRUE)
+
+# remove entries outside of this window in the ems data
+ems_data <- ems_data %>% filter(ankunftszeit_laut_voranmeldung >= min_clinical_time & ankunftszeit_laut_voranmeldung <= max_clinical_time)
+
+# Count total entries after filtering
+total_entries_after <- nrow(ems_data)
+
+```
+
+**How many entries did we remove?**
+
+```{r}
+
+# Calculate the number of entries removed
+entries_removed <- total_entries_before - total_entries_after
+
+# Print the results
+print(paste("Total EMS entries before filtering: ", total_entries_before, 
+            ". Total EMS entries after filtering: ", total_entries_after, 
+            ". Total entries removed: ", entries_removed, "."))
+
+```
+
+### Clinical Records Not Transported by EMS
+
+**Prepare the data for better readability**
+
+In the original data, the variable `ly_einlief` (how did the patient arrive in the emergency department) display numbers instead of names. In this step we give the variable English names.
+
+```{r}
+
+clinical_data$ways_of_admission_transport <- recode_factor(
+           clinical_data$ly_einlief,
+           "2" = "EMS with Emergency Physician",
+           "3" = "EMS without Emergency Physician",
+           "13" = "EMS with Emergency Physician",
+           "4" = "EMS with Emergency Physician",
+           "9" = "EMS without Emergency Physician",
+           "10" = "Other Transport",
+           "11" = "Other Transport",
+           "5" = "EMS without Emergency Physician",
+           "6" = "EMS with Emergency Physician",
+           "7"  = "Other Transport",
+           "8" = "Other Transport",
+           "12" = "Other Transport" ,
+           "1" = "Self Instruction") 
+
+
+clinical_data$ways_of_admission_origin <- recode_factor(
+           clinical_data$ly_einlief,
+           "2" = "EMS via Emergency Call",
+           "3" = "EMS via Emergency Call",
+           "13" = "EMS via Emergency Call",
+           "4" = "General Practitioner",
+           "9" = "General Practitioner",
+           "10" = "General Practitioner",
+           "11" = "General Practitioner",
+           "5" = "Drip and Ship",
+           "6" = "Drip and Ship",
+           "7"  = "Drip and Ship",
+           "8" = "Drip and Ship",
+           "12" = "Internal Transfer" ,
+           "1" = "Self Instruction") 
+
+
+```
+
+**Filter EMS Records**
+
+```{r}
+
+clinical_data <- clinical_data %>% filter(ways_of_admission_transport %in% c("EMS with Emergency Physician", "EMS without Emergency Physician"))
+
+```
+
+## Remove Multiple Patient Entries in EMS-Data
+
+Later in our process, we will delete duplicate rounded timestamps before merging the records of the two datasets, as this is necessary for a unique assignment. However, as we will see, there are multiple entries per patient. Analysis of these duplicates revealed that they differ only in the information contained in the "initial diagnosis" field. Typically, the information does not contradict itself. For example, one entry might say "Stroke," another "Schlaganfall," and yet another "TIA/Stroke" or "no injuries". Often, the entries are 100% equal and were probably submitted multiple times. The resulting issue is that patients with multiple entries will have the same timestamp (ankuftszeit laut voranmeldung)), making them indistinguishable after rounding and the removal of duplicates. Although the initial diagnosis is important, we will remove this column and choose one entry from duplicates that are completely identical, deleting the others. It is practically impossible for multiple patients to have exactly the same entries, as this would require them to have the same vital parameters and conditions at the exact same moment. This can be ruled out. Consequently, this approach allows us to later remove entries of patients who still have the same rounded timestamp and are unassignable, depending on which of the three options we are analyzing.
+
+**Analyse duplicates**
+
+```{r}
+
+ems_data %>%
+  group_by(ankunftszeit_rounded) %>%
+  filter(n() > 1) %>% 
+  select(alter_laut_ems,
+         ankunftszeit_laut_voranmeldung,
+         ankunftszeit_rounded) %>% 
+  print_DT()
+
+```
+
+We can see that the majority of the records have the same timestap if we round it down to an hour. This is not even possible in a CSC as the related clinic in Bad Neustadt is.
+
+**Remove total duplicates**
+
+*Step 1: Remove the column `ems_data$anmeldediagnose`*
+
+```{r}
+
+ems_data <- ems_data %>% select(-"anmeldediagnose")
+
+```
+
+*Step 2: Delete all duplicates, but keep one in the dataframe*
+
+```{r}
+
+ems_data <- ems_data %>% distinct(.keep_all = TRUE)
+
+```
+
+**Remove similar duplicate enries, which are probably submitted multiple times per patient**
+
+In this remaining dataset, many entries are still observed to be very similar. The timestamps are either exactly or almost identical, and the ages are also the same. It seems that for each patient, the data has been submitted multiple times with slight variations. These duplicates are suitable for later matching, thus the timestamp appears multiple times and will be dropped as a result. Deleting all duplicates is not an option either, as using a method such as creating an ID with timestamp and age and retaining only one distinct entry (distinct(matching_ID_ems)) would result in the loss of valuable patient information, especially when one of the dropped entries might have had more information than the first one.
+
+*Step 1: create an ID, taking the combination of ankunftszeit_rounded and age*
+
+```{r}
+
+# Create IDs (rounded arrival-time + age)
+ems_data$matching_ID_ems <- paste(ems_data$ankunftszeit_rounded, ems_data$alter_laut_ems, sep = "_")
+
+```
+
+*Step 2: Just take the entries with the most information, if the matching*
+
+1.  **Defining the Function `prioritize_complete_entries`**:
+    -   The function takes the dataframe `ems_data` as its argument.
+    -   Inside the function:
+        -   `group_by(matching_ID_ems)`: Groups the data in `ems_data` by the `matching_ID_ems` column. This is essential for identifying duplicate records based on this unique identifier.
+        -   `mutate(non_null_count = rowSums(!is.na(ems_data)))`: Adds a new column, `non_null_count`, to `ems_data`. This column counts the number of non-missing values for each row, indicating the level of completeness of each record.
+        -   `arrange(desc(non_null_count), desc(ankunftszeit_rounded))`: Sorts the records first by `non_null_count` in descending order, prioritizing records with more complete data. Then, it sorts by `ankunftszeit_rounded` in descending order to prioritize the most recent records among those with equal completeness.
+        -   `slice(1)`: Selects the first (top) record in each group after sorting. This record represents the most complete and recent entry for each unique `matching_ID_ems`.
+        -   `ungroup()`: Removes the grouping from `ems_data`.
+        -   `select(-non_null_count)`: Removes the `non_null_count` column as it is no longer needed after the sorting and selection process.
+2.  **Applying the Function**:
+    -   `prioritized_data <- prioritize_complete_entries(ems_data)`: Applies the `prioritize_complete_entries` function to the `ems_data` dataframe. The function uses `matching_ID_ems` to identify and manage duplicates.
+3.  **Displaying the Processed Data**:
+    -   `head(prioritized_data)`: Displays the first few rows of the processed dataset from `ems_data`. This helps to quickly confirm that the function has successfully retained the most complete and recent record for each unique `matching_ID`.
+
+```{r}
+
+prioritize_complete_entries <- function(ems_data) {
+  ems_data %>%
+    # Calculate row-wise completeness excluding the grouping key
+    mutate(
+      non_null_count = rowSums(!is.na(select(., -matching_ID_ems)), na.rm = TRUE)
+    ) %>%
+    # Segment data by the unique EMS matching identifier
+    group_by(matching_ID_ems) %>%
+    # Primary sort: Completeness
+    # Secondary sort: Arrival time
+    arrange(
+      desc(non_null_count), 
+      desc(ankunftszeit_rounded), 
+      .by_group = TRUE
+    ) %>%
+    # Extract the best observation per group
+    slice(1) %>%
+    ungroup() %>%
+    # Clean up the metadata column
+    select(-non_null_count)
+}
+
+# Apply the function to ems_data
+ems_data <- prioritize_complete_entries(ems_data)
+
+```
+
+**Limitations**
+
+There exists a possibility that, despite rounding timestamps to the hour and considering the age, two different patients might be represented by similar records. In cases where we retain the record with the most information and remove the other, there is a risk of incorrectly matching a patient in our dataset with a corresponding record in the clinical dataset, especially if there are no duplicates in the timestamp in the clinical data. This could lead to an erroneous matching of EMS data with clinical data for a particular patient. However, this risk is assessed to be very low and, if it occurs at all, is expected to be a very isolated incident. The approach is based on the assumption that instances of two different patients having nearly identical timestamps and ages are extremely rare, thereby minimizing the likelihood of such mismatches.
+
+**Set data classes in the ems-dataset**
+
+This is important, that `crosstabel::crosstable` later works and knows how to display the variables
+
+```{r}
+
+# Converting character columns to numeric
+
+ems_data$alter_laut_ems <- as.numeric(ems_data$alter_laut_ems)
+ems_data$bd_systolisch <- as.numeric(ems_data$bd_systolisch)
+ems_data$bd_diastolisch <- as.numeric(ems_data$bd_diastolisch)
+ems_data$puls <- as.numeric(ems_data$puls)
+ems_data$bz <- as.numeric(ems_data$bz)
+ems_data$temperatur <- as.numeric(ems_data$temperatur)
+
+# Converting character columns to factors
+ems_data$vigilanz_4ISS <- as.factor(ems_data$vigilanz_4ISS)
+ems_data$kopf_blickwendung_4ISS <- as.factor(ems_data$kopf_blickwendung_4ISS)
+ems_data$hemiparese_4ISS <- as.factor(ems_data$hemiparese_4ISS)
+ems_data$sprach_sprechstoerung_4ISS <- as.factor(ems_data$sprach_sprechstoerung_4ISS)
+ems_data$infektion <- as.factor(ems_data$infektion)
+ems_data$bewusstseinslage <- as.factor(ems_data$bewusstseinslage)
+
+```
+
+**Delete the first row in clinical_data**
+
+```{r}
+
+clinical_data <- clinical_data[,-1]
+
+```
+
+**Calculate the 4ISS out of single values in EMS-Data**
+
+The 4I-SS is a critical measure for assessing stroke severity. In this step, we calculate the 4I-SS in the EMS dataset from individual clinical parameters. This calculation aligns the EMS data with the clinical dataset, enabling a later comparison of stroke severity scores between the two datasets.
+
+```{r}
+
+ems_data <- ems_data %>%
+  mutate(
+    vigilanz_score = as.numeric(str_extract(vigilanz_4ISS, "^[0-9]+")),
+    kopf_blickwendung_score = as.numeric(str_extract(kopf_blickwendung_4ISS, "^[0-9]+")),
+    hemiparese_score = as.numeric(str_extract(hemiparese_4ISS, "^[0-9]+")),
+    sprach_sprechstoerung_score = case_when(
+      sprach_sprechstoerung_4ISS == "ja" ~ 1,
+      sprach_sprechstoerung_4ISS == "nein" ~ 0,
+      TRUE ~ as.numeric(str_extract(sprach_sprechstoerung_4ISS, "^[0-9]+"))
+    ),
+    total_ems_score_4ISS = vigilanz_score + kopf_blickwendung_score + hemiparese_score + sprach_sprechstoerung_score
+  ) %>%
+  select(-vigilanz_4ISS, -kopf_blickwendung_4ISS, -hemiparese_4ISS, -sprach_sprechstoerung_4ISS) 
+
+```
+
+**Plausibility Check**
+
+```{r}
+
+ems_data %>% 
+  select(vigilanz_score,
+        kopf_blickwendung_score,
+        hemiparese_score,
+        sprach_sprechstoerung_score,
+        total_ems_score_4ISS
+        ) %>% 
+  head(5) %>% 
+  print_DT()
+
+```
+
+**Ensure 4I-SS Range from 0-7**
+
+```{r}
+
+# Convert 4I-SS scores outside the range 0-7 to NA in EMS dataset
+ems_data <- ems_data %>%
+  mutate(total_ems_score_4ISS = ifelse(total_ems_score_4ISS < 0 | total_ems_score_4ISS > 7,
+                                       NA,
+                                       total_ems_score_4ISS))
+
+# Convert 4I-SS scores outside the range 0-7 to NA in Clinic dataset
+clinical_data <- clinical_data %>%
+  mutate(ly_rd4iss = ifelse(ly_rd4iss < 0 | ly_rd4iss > 7,
+                            NA,
+                            ly_rd4iss))
+
+```
+
+**Create a column for dropping duplicates**
+
+Later, we need to eliminate duplicates for technical reasons. Both timestamps, 'ankunftszeit_laut_voranmeldung' and 'ankunftszeit_laut_clinic', are unique because they are precise down to the second, making it impossible for two patients to have a timestamp at the exact same second. However, these columns are in a datetime format, and the function for dropping duplicates does not work effectively on them. It only considers the date, but we need a more precise approach. To resolve this issue, we will convert both timestamp into a string format.
+
+```{r}
+
+# we convert the clinic_data$ankunftszeit_laut_clinic to a string
+
+ems_data$unique_ems_timestamp <- as.character(ems_data$ankunftszeit_laut_voranmeldung)
+
+clinical_data$unique_clincial_timestamp <- as.character(clinical_data$ankunftszeit_laut_klinik)
+
+```
+
+## Validation of Quasi-Identifiers: Availability and Distributional Similarity
+
+This section focuses on the critical evaluation of potential quasi-identifiers concerning their data availability (missingness) and distributional characteristics.
+
+The availability analysis is fundamental in determining the feasibility of record linkage. Since the matching process operates exclusively on non-missing values, a high rate of missing data significantly limits the potential match cohort.
+
+We also check how similar the distributions of the candidate variables are between the EMS data and the clinical data. Since both variables should represent the same information for the same patients, their distributions must look very similar. This check confirms that the variables are suitable for the matching process.
+
+**Availability (Missingness)**
+
+```{r}
+
+# Calculate available values and percentages for EMS dataset
+available_ems <- tibble(
+  Variable = c("Timestamps", "Age", "4I-SS Score"),
+  Available_EMS = c(
+    sum(!is.na(ems_data$ankunftszeit_laut_voranmeldung)),
+    sum(!is.na(ems_data$alter_laut_ems)),
+    sum(!is.na(ems_data$total_ems_score_4ISS))
+  ),
+  Total_EMS = nrow(ems_data)
+) %>%
+  mutate(Percent_Available_EMS = round(Available_EMS / Total_EMS * 100, 2))
+
+# Calculate available values and percentages for Clinic dataset
+available_clinic <- tibble(
+  Variable = c("Timestamps", "Age", "4I-SS Score"),
+  Available_Clinic = c(
+    sum(!is.na(clinical_data$ankunftszeit_laut_klinik)),
+    sum(!is.na(clinical_data$alter_laut_klinik)),
+    sum(!is.na(clinical_data$ly_rd4iss))
+  ),
+  Total_Clinic = nrow(clinical_data)
+) %>%
+  mutate(Percent_Available_Clinic = round(Available_Clinic / Total_Clinic * 100, 2))
+
+# Combine datasets and format the table
+overview <- available_ems %>%
+  select(Variable, Available_EMS, Percent_Available_EMS) %>%
+  left_join(
+    available_clinic %>%
+      select(Variable, Available_Clinic, Percent_Available_Clinic),
+    by = "Variable"
+  ) %>%
+  mutate(
+    EMS = paste0(Available_EMS, " (", Percent_Available_EMS, "%)"),
+    Clinic = paste0(Available_Clinic, " (", Percent_Available_Clinic, "%)")
+  ) %>%
+  select(Variable, EMS, Clinic)
+
+# Display the overview table
+print(overview)
+
+```
+
+**Distributional Similarity**
+
+Timestamps
+
+```{r}
+
+ggplot() +
+  geom_density(
+    data = ems_data,
+    aes(x = ankunftszeit_laut_voranmeldung, color = "EMS"),
+    na.rm = TRUE
+  ) +
+  geom_density(
+    data = clinical_data,
+    aes(x = ankunftszeit_laut_klinik, color = "Clinic"),
+    na.rm = TRUE
+  ) +
+  scale_y_continuous(limits = c(0, NA)) +
+  scale_color_manual(
+    values = c("EMS" = "#6F99ADE6", "Clinic" = "#E18727E6")
+  ) +
+  labs(
+    x = "Count of Timestamps",
+    y = "Density",
+    color = "Dataset"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    text = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 10)
+  )
+
+```
+
+Age
+
+```{r}
+
+ggplot() +
+  geom_density(
+    data = ems_data,
+    aes(x = alter_laut_ems, color = "EMS"),
+    na.rm = TRUE
+  ) +
+  geom_density(
+    data = clinical_data,
+    aes(x = alter_laut_klinik, color = "Clinic"),
+    na.rm = TRUE
+  ) +
+  scale_y_continuous(limits = c(0, NA)) +
+  scale_color_manual(
+    values = c("EMS" = "#6F99ADE6", "Clinic" = "#E18727E6")
+  ) +
+  labs(
+    x = "Age",
+    y = "Density",
+    color = "Dataset"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    text = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 10)
+  )
+
+```
+
+4I-SS
+
+```{r}
+
+ggplot() +
+  geom_histogram(
+    data = ems_data,
+    aes(x = total_ems_score_4ISS, y = after_stat(count / sum(count)), fill = "EMS"),
+    binwidth = 1, boundary = -0.5, position = "identity", alpha = 0.7, na.rm = TRUE
+  ) +
+  geom_histogram(
+    data = clinical_data,
+    aes(x = ly_rd4iss, y = after_stat(count / sum(count)), fill = "Clinic"),
+    binwidth = 1, boundary = -0.5, position = "identity", alpha = 0.7, na.rm = TRUE
+  ) +
+  scale_x_continuous(breaks = 0:7, limits = c(-0.5, 7.5)) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c("EMS" = "#6F99ADE6", "Clinic" = "#E18727E6")) +
+  labs(x = "4I-SS Score", y = "Proportion", fill = "Dataset") +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    text = element_text(size = 10),
+    axis.text.x = element_text(size = 10, vjust = 0.5),
+    axis.title.y = element_text(size = 10),
+    axis.title.x = element_text(size = 10)
+  )
+
+```
+
+# Matching Process
+
+## Prepare Data
+
+To improve readability and facilitate matching, we create new columns with intuitive names.
+
+```{r}
+
+# Preprocess EMS data
+ems_data <- ems_data %>%
+  mutate(
+    index_ems = row_number(), 
+    time_stamp   = ankunftszeit_laut_voranmeldung,
+    date         = as.Date(ankunftszeit_laut_voranmeldung),    
+    age          = alter_laut_ems,                     
+    score_4ISS   = total_ems_score_4ISS   
+  )
+
+# Preprocess clinical data
+clinical_data <- clinical_data %>%
+  mutate(
+    index_clinic = row_number(),
+    time_stamp      = ankunftszeit_laut_klinik,
+    date            = as.Date(ankunftszeit_laut_klinik),    
+    age             = alter_laut_klinik,                  
+    score_4ISS      = ly_rd4iss,
+    EVT             = ly_thromb
+  )
+
+```
+
+## Initial Matching by Date
+
+We perform an `inner_join` on the date column to generate all possible matches for each day.
+
+```{r}
+
+matched_by_date <- ems_data %>%
+  inner_join(clinical_data, by = "date", suffix = c("_ems", "_clinic")) 
+
+```
+
+## Calculate Time Difference
+
+The absolute difference between EMS and clinical timestamps is computed in minutes to enable time-based matching.
+
+```{r}
+
+# Calculate the difference in minutes (EMS time minus clinical time)
+matched_by_date <- matched_by_date %>% 
+  mutate(
+    timestamp_diff = abs(as.numeric(difftime(time_stamp_ems,
+                                             time_stamp_clinic,
+                                             units = "mins")))
+  )
+
+```
+
+## Filter by Age
+
+To further narrow down the data and matches, an additional constraint is applied: In addition to requiring the same date which resulted in over 5000 entries, matches must have a similar age. A match is retained if the age difference between EMS and clinical data is maximum one year
+
+This step is performed to make the matching process more transparent for manual review later. By reducing the number of potential matches, it becomes easier to assess how well the approach has worked and identify any inconsistencies.
+
+Previous analyses have shown that clinical records often list an age that is one year higher than in EMS data, but not the other way around. This pattern suggests that requiring an exact age match would be too restrictive. Instead, a deviation of up to one year is allowed.
+
+```{r}
+
+matched_and_filtered <- matched_by_date %>% 
+  filter(abs(age_ems - age_clinic) <= 1)
+
+```
+
+## Plot Difference in Timestamps grouped by Difference in Age
+
+The plot shows that when the age difference is **0 or 1**, most of the matched entries between EMS and the clinic fall within **20 minutes**. In contrast, cases where the age difference is **greater than 1** appear to be almost uniformly distributed across the time differences.
+
+This strongly suggests that our assumption is correct: the clinical age is systematically recorded **one year higher** than the EMS age for the same patient, but these entries likely still correspond to the correct clinical counterpart.
+
+Additionally, age appears to be a **highly valuable feature** for ensuring accurate matches. The **uniform distribution** in cases with large age differences indicates that these matches also tend to have **high and randomly distributed timestamp differences**, making them less reliable.
+
+```{r}
+
+# Categorize age differences into four groups
+data_for_plotting <- matched_by_date %>%
+  drop_na(age_ems, age_clinic) %>%  # Corrected function for removing NAs
+  mutate(
+    age_group = case_when(
+      abs(age_ems - age_clinic) == 0 ~ "Age Diff = 0",
+      abs(age_ems - age_clinic) == 1 ~ "Age Diff = 1",
+      abs(age_ems - age_clinic) > 1 ~ "Age Diff > 1",
+      TRUE ~ "No Age Diff = 1 or >1"  # Ensures all cases are assigned a category
+    )
+  )
+
+ggplot(data_for_plotting, aes(x = timestamp_diff, fill = age_group, color = age_group)) +
+  geom_density(alpha = 0.3) +
+  scale_x_continuous(limits = c(0, 120)) +
+  scale_fill_manual(values = c("#20854EE6", "#0072B5E6", "#BC3C29E6")) +
+  scale_color_manual(values = c("#20854EE6", "#0072B5E6", "#BC3C29E6")) +
+  labs(
+    x = "Timestamp Difference (minutes)",
+    y = "Density",
+    fill = "",
+    color = ""
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    text = element_text(size = 10),
+    axis.text.x = element_text(size = 10, vjust = 0.5),
+    axis.title.y = element_text(size = 10),
+    axis.title.x = element_text(size = 10)
+  )
+
+```
+
+## Check Matches
+
+Some of the timestamps, ages, and documented 4ISS scores are manually reviewed to assess whether the matches are plausible. Rare and important EVT cases will undergo an even more detailed plausibility check. Therefore the variable can be used for filtering within the table.
+
+```{r}
+
+matched_and_filtered %>%
+  select(
+    EVT,
+    time_stamp_ems,
+    time_stamp_clinic,
+    timestamp_diff,
+    age_ems,
+    age_clinic,
+    score_4ISS_ems,
+    score_4ISS_clinic) %>% 
+  print_DT()
+
+```
+
+## Filter by Timestamp-Difference
+
+Separate the data into secured and unsecured matches. The previous check revealed that most of the matched entries differ by only a few minutes, and a 60-minute threshold will likely capture almost all true matches without risking too many mismatches.
+
+The remaining entries will be separated using `dplyr::anti_join` and reviewed manually in the next step.
+
+```{r}
+
+matched_secured <- matched_and_filtered %>%
+  filter(timestamp_diff < 60)
+
+# all the remaining entries will be labeled as unsecured
+matched_unsecured <- anti_join(matched_and_filtered, matched_secured)
+
+```
+
+## Check Unmatched EVT Entries
+
+Since EVT cases are rare and crucial for machine learning, the 17 unmatched EVT cases that fall outside the 60-minute time window are analyzed in a Google Sheets table to determine if any of them are highly likely to be true matches.
+
+```{r}
+
+# How many EVT cases could potentially be matched manually
+
+sum(matched_secured$ly_thromb, na.rm = TRUE)
+
+sum(matched_unsecured$ly_thromb, na.rm = TRUE)
+
+```
+
+```{r}
+
+matched_unsecured %>%
+  select(
+    EVT,
+    time_stamp_ems,
+    time_stamp_clinic,
+    timestamp_diff,
+    age_ems,
+    age_clinic,
+    score_4ISS_ems,
+    score_4ISS_clinic)  %>% 
+  print_DT()
+
+```
+
+Three EVT cases are manually added by their index number.
+
+```{r}
+
+stroke_triage_data <- rbind(
+  matched_secured,
+  matched_unsecured[c(133, 171, 211), ]
+)
+
+```
+
+## Remove Duplicated
+
+Duplicates need to be removed to ensure that each EMS or clinic entry appears only **once** in the final linked dataset. However, important **duplicate EVT matches** were carefully reviewed, and their indices were retained, while all other duplicates were dropped for efficiency reasons.
+
+```{r}
+
+# Protected row indices
+protected_indices <- c(765, 1091, 1094, 1157)
+
+# Find all duplicated values across both index_ems and index_clinic
+duplicated_ems <- stroke_triage_data %>%
+  group_by(index_ems) %>%
+  filter(n() > 1) %>%
+  pull(index_ems) %>%
+  unique()
+
+duplicated_clinic <- stroke_triage_data %>%
+  group_by(index_clinic) %>%
+  filter(n() > 1) %>%
+  pull(index_clinic) %>%
+  unique()
+
+# Final filtering
+stroke_triage_data <- stroke_triage_data %>%
+  filter(
+    row_number() %in% protected_indices |
+      !(index_ems %in% duplicated_ems | index_clinic %in% duplicated_clinic)
+  )
+
+```
+
+## Final Plausibility Check
+
+```{r}
+
+stroke_triage_data %>% print_DT()
+
+```
+
+**Save table in a csv. file**
+
+```{r}
+
+write.csv(stroke_triage_data, "data_manipulation_1_merge.csv")
+
+```

@@ -1,0 +1,277 @@
+---
+title: "Unsupervised Feature Selection"
+format: html
+editor: visual
+---
+
+**Load Packages**
+
+```{r}
+
+library(here) # Project-relative paths & file management
+
+library(tidyverse)
+library(caret)
+library(reshape2) # converting correlation matrix to tidy table
+
+```
+
+**Load Data as a tibble**
+
+```{r}
+
+stroke_triage_data <- read_csv(here("Code",
+                                    "Data Preprocessing",
+                                    "data_manipulation_3_mlpreprocessing",
+                                    "data_manipulation_3_mlpreprocessing.csv"))
+
+```
+
+# Unsupervised Feature Selection
+
+We will split the feature selection process into two phases. Firstly, we'll conduct unsupervised feature selection, focusing on identifying features with low variance and high correlation. In the second phase, supervised feature selection will be executed, prioritizing features based on their predictive power for the dependent variable.
+
+The reason behind this division is to accommodate missing value imputation between these processes. Certain variables may be valuable for imputation purposes but lack predictive value for the model itself. By separating the two phases, we ensure a high quality imputation and model training process.
+
+```{r}
+
+# Calculate the sum of exclusion_surgery_status
+total_exclusion_surgery_status <- sum(stroke_triage_data$mortality, na.rm = TRUE)
+
+# Calculate the number of non-NA values in exclusion_surgery_status
+non_na_count <- sum(!is.na(stroke_triage_data$mortality))
+
+print(non_na_count)
+
+print(total_exclusion_surgery_status)
+
+```
+
+**Show variables**
+
+```{r}
+
+str(stroke_triage_data)
+
+```
+
+Before the quantitative-driven part of feature selection begins, the features will be qualitatively examined to determine whether they can be beneficial for this study. The process is divided into supervised and unsupervised feature selection because the imputation process is carried out using algorithms that leverage other features as information to predict missing values as accurately as possible. In other words, variables that adequately describe others should not have been excluded during the imputation. Unsupervised feature selection is defined as examining the characteristics of the data without establishing the predictive significance of the feature-label relationship. This involves primarily attempting to exclude variables that either show no or little variance or contain very many levels. Under these circumstances, the predictive capability, regardless of which variable in the dataset, can be considered low. Following imputation, attention is turned to supervised feature selection, where it is evaluated whether the remaining variables have predictive properties regarding our target variable (whether an EVT was performed).
+
+## Exclude Variables with Little and Zero Variance
+
+**Understanding `freqRatio` and `percentUnique`:**
+
+-   **A `freqRatio` of 19**: This indicates that the most frequent category occurs at least 19 times more than the second most frequent category. It is a strong indicator that the feature might not provide meaningful variability or information for modeling because one category dominates so profoundly.
+
+-   **A `percentUnique` of** 5.87**%**: This metric shows that 5.87% (see variable age) of all values are unique. The Result often shows a **`percentUnique`** of 0.16326531. This is the value of all boolean variables, because this is caluculated: 1225 divided by 2. Two variables have a **`percentUnique`** of 0.08163265% because they have no variance and just zeros: 1225 divided by 1.
+
+    This is a interesting information, but not as important as freqRatio. Especially boolean and categorical variables have a really low value.
+
+```{r}
+
+# Find near zero variance predictors
+nzv <- caret::nearZeroVar(stroke_triage_data,
+                          freqCut = 20, # we set the freqRatio threshold to 20
+                          saveMetrics= TRUE) # to show the dataframe below
+
+nzv %>% arrange(desc(zeroVar), desc(nzv), desc(freqRatio))
+
+```
+
+**Understanding `freqRatio` and `percentUnique`:**
+
+-   **A `freqRatio` of 20**: This indicates that the most frequent category occurs at least 20 times more ( or more than 5%) than the second most frequent category. It is a strong indicator that the feature might not provide meaningful variability or information for modeling because one category dominates so profoundly.
+
+-   **A `percentUnique` of** 5.87%: This metric shows that 5.87% of all values in a variable, such as age, are unique. This shows that only a small fraction of the total values differ from each other. For boolean variables, the typical `percentUnique` is 0.16326531%. This can be calculated as follows: if you have 1225 boolean observations split between two values (e.g., True and False), `percentUnique` is computed as ((2 / 1225) x 100). If a variable displays a `percentUnique` of 0.08163265%, it indicates zero variance, with all values being identical, and this is calculated by ((1 / 1225) x 100). While `percentUnique` provides useful insights into the uniqueness of data points within a variable, `freqRatio` often carries more significance. This is particularly true for boolean and categorical variables, which generally show very low percentUnique values.
+
+**Remove All Variables With No or Little Variance**
+
+```{r}
+
+nzv_variables <- names(stroke_triage_data)[nzv$nzv]
+print(nzv_variables)
+
+```
+
+```{r}
+
+nzv %>% 
+  filter(nzv == TRUE)
+
+```
+
+```{r}
+
+# Remove NZV features from the dataset
+stroke_triage_data <- stroke_triage_data %>% 
+  select(-infection,
+         -exclusion_surgery_status,
+         -mortality)
+
+```
+
+```{r}
+
+# Remove Diagnosisis at admission, we already have diagnosis at discharge
+
+stroke_triage_data <- stroke_triage_data %>% 
+  select(-diagnosis_admission)
+
+```
+
+## Exclude Highly Correlated Features
+
+Data can contain attributes that are highly correlated with each other. Many ML-methods perform better if highly correlated attributes are removed.
+
+**`use = "pairwise.complete.obs"`**
+
+As a standard, the `cor()` function in R uses `use = "everything"`. This implies that if there is any missing value in a column, R will return \`NA\`. In real-world datasets, this often results in a matrix filled with missing values. Therefore, one might choose to use `use = "complete.obs`", where only complete cases are used for regression analysis, or `use = "pairwise.complete.obs`", which is probably the most useful method.
+
+```{r}
+
+# only extract numeric columns, otherwise cor() does not work
+numeric_data_before <- stroke_triage_data[sapply(stroke_triage_data, is.numeric)]
+
+cor_matrix_1 <- cor(numeric_data_before,
+# use = "pairwise.complete.obs": otherwise we get just NA´s, because the the cor() Function correlates all cases and if there are NA´s in any column, it returns NA.  
+                  use = "pairwise.complete.obs" 
+                  )
+
+
+```
+
+**1. Renaming columns for clarity**
+
+Renaming columns in a data frame makes it easier to understand and manage the data. In this context, changing column names to "Variable1", "Variable2", and "Correlation" makes it clear that each row represents a correlation coefficient between two variables. This step is particularly helpful for keeping track of which variables are being compared in subsequent analyses.
+
+**2. Removing diagonal entries**
+
+In a correlation matrix, diagonal entries represent the correlation of each variable with itself, which is always exactly 1. These entries are not useful for analysis that seeks to understand relationships between different variables. Thus, removing these entries simplifies the dataset by focusing only on the relationships between distinct variables.
+
+**3. Removing duplicates**
+
+Correlation matrices are symmetric, meaning the correlation between **`Variable1`** and **`Variable2`** is the same as between **`Variable2`** and **`Variable1`**. Without adjustment, this symmetry would result in duplicate entries for each correlation. This code ensures that each unique correlation is listed only once, preventing redundancy and making analysis more efficient and less cluttered.
+
+**4. Sorting by correlation**
+
+Sorting the data by the absolute values of the correlation coefficients in descending order helps quickly identify the strongest relationships (both positive and negative) between variables. This prioritization is useful in analyses focused on the most significant correlations, allowing researchers or analysts to direct their attention to the most influential relationships first.
+
+```{r}
+
+cor_matrix_1 = round((cor_matrix_1), digits = 2)
+
+# Reshape data
+cor_data_1 <- melt(cor_matrix_1)
+
+# Rename columns for clarity
+names(cor_data_1) <- c("Variable1", "Variable2", "Correlation")
+
+# Remove diagonal entries where Variable1 and Variable2 are the same
+# These entries are always 1, representing each variable's correlation with itself
+cor_data_1 <- cor_data_1[cor_data_1$Variable1 != cor_data_1$Variable2, ]
+
+# Remove duplicates: only keep one pair of correlations regardless of order
+# This avoids showing both cor(A, B) and cor(B, A) when they are the same
+cor_data_1 <- cor_data_1[!duplicated(t(apply(cor_data_1[, 1:2], 1, sort))), ]
+
+# Sort the data by the strength of correlation, in descending order of absolute values
+# This helps in quickly identifying the pairs with the strongest correlations
+# abs() does not change the values, but just use it for sorting 
+
+cor_data_1 <- cor_data_1 %>%
+  arrange(desc(abs(Correlation))) %>% 
+
+  drop_na(Correlation)
+
+print(cor_data_1)
+
+```
+
+```{r}
+
+# Remove diagonal entries where Variable1 and Variable2 are the same
+cor_data_1 <- cor_data_1[cor_data_1$Variable1 != cor_data_1$Variable2, ]
+
+# Remove duplicates: only keep one pair of correlations regardless of order
+cor_data_1 <- cor_data_1[!duplicated(t(apply(cor_data_1[, 1:2], 1, sort))), ]
+
+# Sort the data by the strength of correlation, in descending order of absolute values
+cor_data_1 <- cor_data_1 %>%
+  arrange(desc(abs(Correlation))) %>% 
+  drop_na(Correlation)
+
+```
+
+**Delete All Highly Correlated Features**
+
+When we examine the correlation matrix above, we observe multiple instances of high correlations among variables. We specifically focus on features where Pearson's ( R ) is greater than 0.5. The following variables will be excluded from the dataset due to high correlation:
+
+```{r}
+
+numeric_data_after <- numeric_data_before %>%
+  select(-score_GCS,
+         -GCS_verbal,
+         -GCS_motor,
+         -GCS_eyes,
+         -NIHSS_at_admission,
+         -score_4ISS,
+         -bp_diastolic,
+         -exclusion_anticoag_status,
+         -consciousness_impaired)
+
+```
+
+**Check the Correlation After Deleting Highly Correlated Features**
+
+```{r}
+
+cor_matrix_2 <- cor(numeric_data_after,
+                  use = "pairwise.complete.obs")
+
+# Reshape data
+cor_data_2 <- melt(cor_matrix_2)
+
+# Rename columns for clarity
+names(cor_data_2) <- c("Variable1", "Variable2", "Correlation")
+
+# Remove diagonal entries where Variable1 and Variable2 are the same
+# These entries are always 1, representing each variable's correlation with itself
+cor_data_2 <- cor_data_2[cor_data_2$Variable1 != cor_data_2$Variable2, ]
+
+# Remove duplicates: only keep one pair of correlations regardless of order
+# This avoids showing both cor(A, B) and cor(B, A) when they are the same
+cor_data_2 <- cor_data_2[!duplicated(t(apply(cor_data_2[, 1:2], 1, sort))), ]
+
+# Sort the data by the strength of correlation, in descending order of absolute values
+# This helps in quickly identifying the pairs with the strongest correlations
+# abs() do not change the values, but just use it for sorting 
+cor_data_2 <- cor_data_2 %>%
+  arrange(desc(abs(Correlation)))  %>% 
+  drop_na(Correlation)
+
+print(cor_data_2)
+
+```
+
+```{r}
+
+max(cor_data_1$Correlation, na.rm = TRUE)
+mean(abs(cor_data_1$Correlation), na.rm = TRUE)
+
+
+max(cor_data_2$Correlation, na.rm = TRUE)
+mean(abs(cor_data_2$Correlation), na.rm = TRUE)
+
+```
+
+**Result:**
+
+Removing the features effectively decreased collinearity.
+
+**Export Data**
+
+```{r}
+
+write_csv(stroke_triage_data, "data_manipulation_4_UFS.csv")
+
+```

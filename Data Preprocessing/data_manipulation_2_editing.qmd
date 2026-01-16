@@ -1,0 +1,217 @@
+---
+title: "Data Manipulation 2: Editing"
+format: html
+editor: visual
+---
+
+**Load libraries**
+
+```{r}
+
+library(here) # Project-relative paths & file management
+
+library(tidyverse) # data manipulation
+
+```
+
+## Import merged data
+
+```{r}
+
+data_manipulation_1_merge <- read_csv(here("Code",
+                                           "Data Preprocessing",
+                                           "data_manipulation_1_merge",
+                                           "data_manipulation_1_merge.csv"))
+
+```
+
+## Select Variables
+
+Our initial dataframe contains several variables that are unnecessary. However, we will utilize most of the EMS data since it contains all the patient information. For the clinical data, we will exclude all columns except for EVT information, which will serve as our machine learning label.
+
+```{r}
+
+selected_columns <- data_manipulation_1_merge %>%
+  select(sex,
+         alter_laut_klinik,
+         bd_systolisch,
+         bd_diastolisch,
+         puls,
+         bz,
+         temperatur,
+         vigilanz_score,
+         kopf_blickwendung_score,
+         hemiparese_score,
+         sprach_sprechstoerung_score,
+         total_ems_score_4ISS,
+         GCS_augen,
+         GCS_motor,
+         GCS_verbal,
+         GCS,
+         pupillenreaktion_rechts,
+         pupillenreaktion_links,
+         bewusstseinslage,
+         sonstige_neurologische_auffälligkeiten,
+         infektion,
+         ly_nihssbauf,
+         ly_med_akoag,
+         ly_med_thro,
+         ly_sym_dauer,
+         ly_a_zeit,
+         ly_a_koag,
+         ly_a_op,
+         ly_zt_ct,
+         ly_zt_bolus,
+         ly_adiag,
+         ly_ediag,
+         ly_lyse,
+         ly_thromb,
+         Mortalität)
+
+```
+
+## Format Data
+
+**check current column formats**
+
+```{r}
+
+# check current formats
+str(selected_columns)
+
+```
+
+```{r}
+
+cleaned_data <- selected_columns %>%
+  mutate(sex = factor(sex),
+         alter_laut_klinik = as.numeric(alter_laut_klinik),
+         bd_systolisch = as.numeric(bd_systolisch),
+         bd_diastolisch = as.numeric(bd_diastolisch),
+         puls = as.numeric(puls),
+         bz = as.numeric(bz),
+         temperatur = as.numeric(temperatur),
+         vigilanz_score = factor(vigilanz_score),
+         kopf_blickwendung_score = factor(kopf_blickwendung_score),
+         hemiparese_score = factor(hemiparese_score),
+         sprach_sprechstoerung_score = factor(sprach_sprechstoerung_score),
+         total_ems_score_4ISS = as.numeric(total_ems_score_4ISS),
+         GCS = as.numeric(GCS),
+         GCS_augen = as.numeric(GCS_augen),
+         GCS_motor = as.numeric(GCS_motor),
+         GCS_verbal = as.numeric(GCS_verbal),
+         pupillenreaktion_rechts = factor(pupillenreaktion_rechts),
+         pupillenreaktion_links = factor(pupillenreaktion_links),
+         bewusstseinslage = factor(bewusstseinslage),
+         infektion = factor(infektion),
+         ly_nihssbauf = as.numeric(ly_nihssbauf),
+         ly_med_akoag = factor(ly_med_akoag),
+         ly_med_thro = factor(ly_med_thro),
+         ly_sym_dauer = as.numeric(ly_sym_dauer),
+         ly_a_zeit = factor(ly_a_zeit),
+         ly_a_koag = factor(ly_a_koag),
+         ly_a_op = factor(ly_a_op),
+         ly_lyse = factor(ly_lyse),
+         ly_thromb = factor(ly_thromb),
+         Mortalität = factor(Mortalität))
+
+
+```
+
+```{r}
+
+# check updated formats
+str(cleaned_data)
+
+```
+
+## Rename Columns
+
+```{r}
+
+cleaned_data <- cleaned_data %>% 
+    rename(
+        gender = sex,
+        age = alter_laut_klinik,
+        bp_systolic = bd_systolisch,
+        bp_diastolic = bd_diastolisch,
+        pulse = puls,
+        blood_glucose = bz,
+        temperature = temperatur,
+        vigilance_4ISS = vigilanz_score,
+        gaze_head_deviation_4ISS = kopf_blickwendung_score,
+        hemiparesis_4ISS = hemiparese_score,
+        aphasia_dysarthria_4ISS = sprach_sprechstoerung_score,
+        score_4ISS = total_ems_score_4ISS,
+        GCS_eyes = GCS_augen,
+        GCS_motor = GCS_motor,
+        GCS_verbal = GCS_verbal,
+        score_GCS = GCS,
+        pupil_reaction_right = pupillenreaktion_rechts,
+        pupil_reaction_left = pupillenreaktion_links,
+        consciousness_state = bewusstseinslage,
+        other_neurological_findings = sonstige_neurologische_auffälligkeiten,
+        infection = infektion,
+        NIHSS_at_admission = ly_nihssbauf,
+        medication_anticoags = ly_med_akoag,
+        medication_antiplatelets = ly_med_thro,
+        TOO = ly_sym_dauer,
+        exclusion_TOO = ly_a_zeit,
+        exclusion_anticoag_status = ly_a_koag,
+        exclusion_surgery_status = ly_a_op,
+        DTN = ly_zt_ct,
+        DTCT = ly_zt_bolus,
+        diagnosis_admission = ly_adiag,
+        diagnosis_discharge = ly_ediag,
+        IVT = ly_lyse,
+        EVT = ly_thromb, 
+        mortality = Mortalität
+      )
+
+```
+
+## Rename Factors
+
+```{r}
+
+cleaned_data <- cleaned_data %>%
+  mutate(
+    infection = dplyr::recode(infection, 'nein' = 0)
+  )
+
+# convert diagnosis admission and discharge into factor variables for conversion
+
+cleaned_data$diagnosis_admission <- as.factor(cleaned_data$diagnosis_admission)
+cleaned_data$diagnosis_discharge <- as.factor(cleaned_data$diagnosis_discharge)
+
+# conduct recoding
+
+cleaned_data <- cleaned_data %>% 
+  mutate(diagnosis_admission = recode_factor(cleaned_data$diagnosis_admission,
+                                            "1" = "Stroke",
+                                            "2" = "TIA",
+                                            "3" = "TGA",
+                                            "4" = "Bleeding",
+                                            "5" = "Traumatic Brain Injury",
+                                            "6" = "SAB",
+                                            "7" = "SDH",
+                                            "8" = "Stroke Mimic")) %>% 
+  mutate(diagnosis_discharge = recode_factor(cleaned_data$diagnosis_discharge,
+                                            "1" = "Stroke",
+                                            "2" = "TIA",
+                                            "3" = "TGA",
+                                            "4" = "Bleeding",
+                                            "5" = "Traumatic Brain Injury",
+                                            "6" = "SAB",
+                                            "7" = "SDH",
+                                            "8" = "Stroke Mimic"))
+
+```
+
+## Safe the Data as csv.
+
+```{r include = FALSE}
+
+write_csv(cleaned_data, "data_manipulation_2_editing.csv")
+
+```

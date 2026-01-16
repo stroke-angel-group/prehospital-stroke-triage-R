@@ -1,0 +1,1096 @@
+---
+title: "Supervised Feature Selection"
+format: html
+editor: visual
+---
+
+**Load Packages**
+
+```{r}
+
+# Project-relative paths & file management
+library(here) 
+
+library(tidyverse)
+library(broom)
+library(caret)
+library(fishualize) 
+library(reshape2) # converting correlation matrix to tidy table
+library(patchwork) # combine multiple plots
+library(infotheo) # calculate mutual information
+library(car) # statistics
+
+# wrapper methods
+library(randomForest)
+library(Boruta)
+
+```
+
+**Load Data as a tibble**
+
+```{r}
+
+stroke_triage_data <- read_csv(here("Code",
+                                    "Data Preprocessing",
+                                    "data_manipulation_4_UFS",
+                                    "data_manipulation_4_UFS.csv"))
+
+```
+
+**Define readable Variable Labels**
+
+```{r}
+
+# Define readable labels
+variable_labels <- c(
+    gender = "Gender",
+    age = "Age",
+    bp_systolic = "Systolic BP",
+    bp_diastolic = "Diastolic BP",
+    pulse = "Pulse",
+    blood_glucose = "Blood Glucose",
+    temperature = "Temperature",
+    vigilance_4ISS = "4I-SS Vigilance",
+    gaze_head_deviation_4ISS = "4I-SS Gaze Head Deviation",
+    hemiparesis_4ISS = "4I-SS Hemiparesis",
+    aphasia_dysarthria_4ISS = "4I-SS Aphasia Dysarthria",
+    score_4ISS = "4I-SS Total",
+    GCS_eyes = "GCS Eyes",
+    GCS_motor = "GCS Motor",
+    GCS_verbal = "GCS Verbal",
+    score_GCS = "GCS Total",
+    NIHSS_at_admission = "NIHSS at Admission",
+    medication_anticoags = "Medication Anticoags",
+    medication_antiplatelets = "Medication Antiplatelets",
+    TOO = "Time of Onset (TOO)",
+    exclusion_TOO = "Exclusion TOO",
+    exclusion_anticoag_status = "Exclusion Anticoag Status",
+    exclusion_surgery_status = "Exclusion Surgery Status",
+    DTN = "Door to Needle",
+    DTCT = "Door to CT",
+    diagnosis_discharge = "Diagnosis at Discharge",
+    pre_existing_neurological_deficit = "Pre-existing Neurological Deficit",
+    IVT = "IVT",
+    EVT = "EVT",
+    pupil_reaction_abnormal = "Abnormal Pupil Reaction",
+    consciousness_impaired = "Consciousness Impaired",
+    mortality = "Mortality",
+    infection = "Infection"
+  )
+
+```
+
+**Define a Color Palette**
+
+```{r}
+
+# Define the color palette with explicit colors for each category
+color_palette <- c(
+  "#BC3C29E6",
+  "#0072B5E6",
+  "#E18727E6",
+  "#20854EE6",
+  "#7876B1E6",
+  "#6F99ADE6",
+  "#FFDC91E6",
+  "#EE4C97E6"
+)
+
+```
+
+# Supervised Feature Selection
+
+**Show variables**
+
+```{r}
+
+str(stroke_triage_data)
+
+```
+
+```{r}
+
+# Transform numeric data into long format, excluding binary and categorical variables
+numeric_data <- c("age", "bp_systolic", "pulse", "blood_glucose", "temperature", "TOO")
+
+# Adjust selection of binary variables
+binary_vars <- c("gender", "medication_anticoags", "medication_antiplatelets", "exclusion_TOO", "pupil_reaction_abnormal", "pre_existing_neurological_deficit")
+
+# Transform binary and categorical data into long format
+binary_categorical_data <- c("vigilance_4ISS", "gaze_head_deviation_4ISS", "hemiparesis_4ISS", "aphasia_dysarthria_4ISS")
+
+# Transform numeric data into long format
+melted_numeric_data <- melt(stroke_triage_data[, numeric_data])
+
+# Transform binary and categorical data into long format
+melted_binary_categorical_data <- melt(stroke_triage_data[, binary_vars])
+
+# Create density plots for each numeric variable
+numeric_plot <- ggplot(melted_numeric_data, aes(x = value)) +
+  geom_density(fill = color_palette[3], alpha = 0.7) +
+  facet_wrap(~ variable, scales = "free", labeller = as_labeller(variable_labels)) +
+  theme_minimal() +
+  labs(title = "Distributions of Numeric Variables", x = "Value", y = "Density")
+
+# Create bar plots for each binary and categorical variable
+binary_categorical_plot <- ggplot(melted_binary_categorical_data, aes(x = factor(value), fill = factor(value))) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(variable_labels)) +
+  theme_minimal() +
+  scale_fill_manual(values = color_palette) +
+  labs(title = "Distributions of Binary and Categorical Variables", x = "Value", y = "Count")
+
+# Display plots
+print(numeric_plot)
+print(binary_categorical_plot)
+
+```
+
+**Set Column Classes**
+
+To ensure that functions work properly, we will first set the column classes for the data. This will ensure that the data is read in as the correct type.
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>%  mutate(
+    gender = as.factor(gender),
+    vigilance_4ISS = as.factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = as.factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS = as.factor(hemiparesis_4ISS),
+    aphasia_dysarthria_4ISS = as.factor(aphasia_dysarthria_4ISS),
+    medication_anticoags = as.factor(medication_anticoags),
+    medication_antiplatelets = as.factor(medication_antiplatelets),
+    exclusion_TOO = as.factor(exclusion_TOO),
+    pupil_reaction_abnormal = as.factor(pupil_reaction_abnormal),
+    pre_existing_neurological_deficit = as.factor(pre_existing_neurological_deficit),
+  )
+
+```
+
+## Filter Methods
+
+### Numerical
+
+**IVT Density Plot**
+
+```{r}
+
+# Convert the data into a long format
+long_data <- stroke_triage_data %>%
+  select(age, bp_systolic, pulse, blood_glucose, temperature, TOO, IVT) %>%
+  pivot_longer(cols = -IVT, names_to = "Variable", values_to = "Value")
+
+# Convert EVT to a factor
+long_data$IVT <- as.factor(long_data$IVT)
+
+# Plot with different colors for lines and custom labels for facets
+ggplot(long_data, aes(x = Value, color = IVT)) +
+  geom_density(size = 1) +
+  facet_wrap(~ Variable, scales = "free", labeller = labeller(Variable = variable_labels)) +
+  scale_color_manual(values = c("0" = "black", "1" = "darkorange"), labels = c("No", "Yes")) +
+  labs(title = "",
+       x = "Value",
+       y = "Density",
+       color = "IVT Therapy") +
+  theme_minimal() +
+  theme(axis.title = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        axis.text = element_text(size = 14),  
+        strip.text = element_text(size = 14),  # Size of facet text
+        legend.position = "top") 
+
+```
+
+**IVT Boxplot**
+
+```{r}
+
+# Convert the data into a long format
+long_data <- stroke_triage_data %>%
+  select(age, bp_systolic, pulse, blood_glucose, temperature, TOO, IVT) %>%
+  pivot_longer(cols = -IVT, names_to = "Variable", values_to = "Value")
+
+# Convert IVT to a factor
+long_data$IVT <- as.factor(long_data$IVT)
+
+# Plot with different colors for lines and custom labels for facets
+ggplot(long_data, aes(x = IVT, y = Value, color = IVT)) +
+  geom_boxplot() +
+  facet_wrap(~ Variable, scales = "free", labeller = labeller(Variable = variable_labels)) +
+  scale_color_manual(values = c("0" = "black", "1" = "darkorange"), labels = c("No", "Yes")) +
+  labs(x = NULL,
+       y = NULL,
+       color = "IVT Therapy") +
+  theme_minimal() +
+  theme(axis.title = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        axis.text = element_text(size = 14),  
+        strip.text = element_text(size = 14),  # Size of facet text
+        legend.position = "top") 
+
+
+
+```
+
+**EVT Density**
+
+```{r}
+
+# Transform data into long format
+long_data <- stroke_triage_data %>%
+  select(age, bp_systolic, pulse, blood_glucose, temperature, TOO, EVT) %>%
+  pivot_longer(cols = -EVT, names_to = "Variable", values_to = "Value")
+
+# Convert EVT to a factor
+long_data$EVT <- as.factor(long_data$EVT)
+
+# Create plot with different colors for the lines and custom labels for facets
+ggplot(long_data, aes(x = Value, color = EVT)) +
+  geom_density(size = 1) +
+  facet_wrap(~ Variable, scales = "free", labeller = labeller(Variable = variable_labels)) +
+  scale_color_manual(values = c("0" = "black", "1" = "darkred"), labels = c("No", "Yes")) +
+  labs(title = "",
+       x = "Value",
+       y = "Density",
+       color = "EVT Therapy") +
+  theme_minimal() +
+  theme(axis.title = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        axis.text = element_text(size = 14),  
+        strip.text = element_text(size = 14),  # Size of facet text
+        legend.position = "top")
+
+```
+
+**EVT Boxplot**
+
+```{r}
+
+# Transform data into long format
+long_data <- stroke_triage_data %>%
+  select(age, bp_systolic, pulse, blood_glucose, temperature, TOO, EVT) %>%
+  pivot_longer(cols = -EVT, names_to = "Variable", values_to = "Value")
+
+# Convert EVT to a factor
+long_data$EVT <- as.factor(long_data$EVT)
+
+# Create plot with different colors for the lines and custom labels for facets
+ggplot(long_data, aes(x = EVT, y = Value, color = EVT)) +
+  geom_boxplot() +
+  facet_wrap(~ Variable, scales = "free", labeller = labeller(Variable = variable_labels)) +
+  scale_color_manual(values = c("0" = "black", "1" = "darkred"), labels = c("No", "Yes")) +
+  labs(x = NULL,
+       y = NULL,
+       color = "EVT Therapy") +
+  theme_minimal() +
+  theme(axis.title = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        axis.text = element_text(size = 14),  
+        strip.text = element_text(size = 14),  # Size of facet text
+        legend.position = "top") 
+
+
+```
+
+**Normal Distribution Test**
+
+To determine which test to use, we will first check the normality assumptions. Based on the results, we will decide whether to use a parametric test or not.
+
+```{r}
+
+# choose numerical variables
+
+numeric_variables <- stroke_triage_data %>%
+  select(age, bp_systolic, pulse, blood_glucose, temperature, TOO, EVT)
+
+```
+
+```{r}
+
+# Perform Shapiro-Wilk tests and collect results
+shapiro_results <- numeric_variables %>%
+  select(-EVT) %>%
+  map_df(~ broom::tidy(shapiro.test(.)), .id = "Variable")
+
+# Format the results
+shapiro_results <- shapiro_results %>%
+  mutate(
+    p_value_formatted = case_when(
+      p.value < .001 ~ "< .001",
+      TRUE ~ sub("^0\\.", ".", format(round(p.value, 3), nsmall = 3))
+    ),
+    statistic = round(statistic, 3)
+  ) %>%
+  select(Variable, statistic, p_value = p_value_formatted) %>%
+  arrange(p_value)
+
+# Display results
+print(shapiro_results)
+
+```
+
+**Q-Q Plots**
+
+```{r}
+
+qq_test_variables <- numeric_variables %>%
+  select(-EVT) 
+
+# Melt the data into a long format
+long_data <- qq_test_variables %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Create Q-Q plot with facets
+qq_plot <- ggplot(long_data, aes(sample = Value)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~ Variable, scales = "free", labeller = as_labeller(variable_labels)) +
+  ggtitle("") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+# Display the plot
+print(qq_plot)
+
+```
+
+**Mann-Whitney U-Test**
+
+```{r}
+
+# Perform Mann-Whitney U tests and calculate medians
+mann_whitney_results <- numeric_variables %>%
+  select(-EVT) %>%
+  map2_dfr(names(.), ~{
+    test <- wilcox.test(.x ~ numeric_variables$EVT)
+    data.frame(
+      Variable = .y,
+      median_no_EVT = median(.x[numeric_variables$EVT == 0], na.rm = TRUE),
+      median_EVT = median(.x[numeric_variables$EVT == 1], na.rm = TRUE),
+      median_diff = median(.x[numeric_variables$EVT == 1], na.rm = TRUE) - median(.x[numeric_variables$EVT == 0], na.rm = TRUE),
+      u_statistic = test$statistic,
+      p_value = test$p.value
+    )
+  })
+
+# Add readable variable labels and format p-values
+mann_whitney_results <- mann_whitney_results %>%
+  mutate(
+    Variable = variable_labels[Variable],
+    p_value_formatted = case_when(
+      p_value < 0.001 ~ "< .001",
+      TRUE ~ sub("^0\\.", ".", sprintf("%.3f", p_value))
+    )
+  )
+
+# Select and rename columns, then sort
+mann_whitney_results <- mann_whitney_results %>%
+  select(Variable, median_no_EVT, median_EVT, median_diff, u_value = u_statistic, p_value = p_value_formatted) %>%
+  arrange(p_value)
+
+# Round the numeric columns to two decimal places
+mann_whitney_results <- mann_whitney_results %>%
+  mutate(across(c(median_no_EVT, median_EVT, median_diff, u_value), ~ round(., 2)))
+
+# Print the results
+print(mann_whitney_results)
+
+```
+
+### Binary
+
+```{r}
+
+stroke_triage_data$EVT <- as_factor(stroke_triage_data$EVT)
+
+```
+
+**Chi-Squared Test Binary Variables**
+
+```{r}
+
+# List of binary variables
+binary_variables <- c("gender", "medication_anticoags", "medication_antiplatelets", 
+                      "exclusion_TOO", "pupil_reaction_abnormal", 
+                      "pre_existing_neurological_deficit")
+ 
+
+# Perform Chi-Square tests and combine results
+chi_square_results <- map_dfr(binary_variables, function(var) {
+  test <- chisq.test(table(stroke_triage_data[[var]], stroke_triage_data$EVT))
+  tidy_test <- tidy(test)
+  
+  # Add readable variable name
+  tidy_test <- tidy_test %>%
+    mutate(Variable = variable_labels[var])
+  
+  return(tidy_test)
+})
+
+# Format results according to APA guidelines
+chi_square_results <- chi_square_results %>%
+  select(Variable, chi_statistic = statistic, p.value) %>%
+  mutate(
+    p_value_formatted = case_when(
+      p.value < .001 ~ "< .001",
+      TRUE ~ sub("^0\\.", ".", format(round(p.value, 3), nsmall = 3))
+    ),
+    chi_statistic = round(chi_statistic, 2)
+  ) %>%
+  select(Variable, chi_statistic, p_value = p_value_formatted) %>%
+  arrange(p_value)
+
+# Display results
+print(chi_square_results)
+
+```
+
+**Mutual Information (Binary)**
+
+```{r}
+
+# Perform MI tests and combine results
+mi_results <- map_dfr(binary_variables, function(var) {
+  # Convert variable to factor if not already
+  stroke_triage_data[[var]] <- as.factor(stroke_triage_data[[var]])
+  
+  # Calculate MI
+  mi <- mutinformation(stroke_triage_data[[var]], stroke_triage_data$EVT)
+  
+  # Create a tidy dataframe for the results
+  tidy_mi <- tibble(
+    Variable = variable_labels[var],
+    mi_value = mi 
+  )
+  
+  return(tidy_mi)
+})
+
+# Format MI values without scientific notation and sort in descending order
+mi_results <- mi_results %>%
+  mutate(
+    mi_value = format(as.numeric(mi_value), scientific = FALSE, digits = 5)
+  ) %>%
+  arrange(desc(as.numeric(mi_value)))
+
+# Display results
+print(mi_results)
+
+```
+
+### Ordinal
+
+```{r}
+
+# Manually reorder levels in the dataset
+visualize_data <- stroke_triage_data %>%
+  mutate(
+    vigilance_4ISS = factor(vigilance_4ISS, levels = c("2", "1", "0")),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS, levels = c("2", "1", "0")),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS, levels = c("2", "1", "0")),
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS, levels = c("1", "0")),
+    EVT = factor(EVT, levels = c("1", "0"), labels = c("EVT", "No EVT"))
+  )
+
+```
+
+```{r}
+
+gray_palette <- c("2" = "#4D4D4D", "1" = "#B3B3B3", "0" = "#E0E0E0")
+
+# Define readable labels
+variable_labels <- c(
+  vigilance_4ISS = "4I-SS Vigilance",
+  gaze_head_deviation_4ISS = "4I-SS Gaze Head Deviation",
+  hemiparesis_4ISS = "4I-SS Hemiparesis",
+  aphasia_dysarthria_4ISS = "4I-SS Aphasia Dysarthria"
+)
+
+# Create a function for horizontal stacked bar plots with gray scales and no legend
+plot_horizontal_stacked_bar <- function(data, variable, label) {
+  ggplot(data, aes_string(x = label, fill = variable)) +
+    geom_bar(position = "fill", color = "black", size = 1.0) +
+    scale_fill_manual(values = gray_palette) +
+    labs(title = variable_labels[[variable]], x = NULL, y = NULL, fill = NULL) +
+    scale_y_continuous(labels = scales::percent) +
+    coord_flip() +
+    theme_minimal() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 11),
+          legend.position = "none")
+}
+
+# Plot for each 4I-SS variable
+p1 <- plot_horizontal_stacked_bar(visualize_data, "vigilance_4ISS", "EVT")
+p2 <- plot_horizontal_stacked_bar(visualize_data, "gaze_head_deviation_4ISS", "EVT")
+p3 <- plot_horizontal_stacked_bar(visualize_data, "hemiparesis_4ISS", "EVT")
+p4 <- plot_horizontal_stacked_bar(visualize_data, "aphasia_dysarthria_4ISS", "EVT")
+
+# Combine plots using patchwork, with no legends
+combined_plot <- (p1 + p2) / (p3 + p4)
+
+# Display the combined plot
+print(combined_plot)
+
+```
+
+**Chi-Squared Test 4I-SS Elements**
+
+```{r}
+
+# List of variables
+stroke_scale_variables <- c("vigilance_4ISS",
+                            "gaze_head_deviation_4ISS",
+                            "hemiparesis_4ISS",
+                            "aphasia_dysarthria_4ISS")
+
+
+# Perform chi-square tests and combine results
+chi_square_results <- map_dfr(stroke_scale_variables, function(var) {
+  test <- chisq.test(table(stroke_triage_data[[var]], stroke_triage_data$EVT))
+  tidy_test <- tidy(test)
+  
+  # Add readable variable name
+  tidy_test <- tidy_test %>%
+    mutate(Variable = variable_labels[var])
+  
+  return(tidy_test)
+})
+
+# Format results according to APA guidelines
+chi_square_results <- chi_square_results %>%
+  select(Variable, chi_statistic = statistic, p.value) %>%
+  mutate(
+    p_value_formatted = case_when(
+      p.value < .001 ~ "< .001",
+      TRUE ~ sub("^0\\.", ".", format(round(p.value, 3), nsmall = 3))
+    ),
+    chi_statistic = round(chi_statistic, 2)
+  ) %>%
+  select(Variable, chi_statistic, p_value = p_value_formatted) %>%
+  arrange(p_value)
+
+# Display results
+print(chi_square_results)
+  
+```
+
+**Mutual Information (4I-SS Elements)**
+
+```{r}
+
+# Perform MI tests and combine results
+mi_results <- map_dfr(stroke_scale_variables, function(var) {
+  # Convert variable to factor if not already
+  stroke_triage_data[[var]] <- as.factor(stroke_triage_data[[var]])
+  
+  # Calculate MI
+  mi <- mutinformation(stroke_triage_data[[var]], stroke_triage_data$EVT)
+  
+  # Create a tidy dataframe for the results
+  tidy_mi <- tibble(
+    Variable = variable_labels[var],
+    mi_value = mi  # Do not round here
+  )
+  
+  return(tidy_mi)
+})
+
+# Format MI values without scientific notation and sort in descending order
+mi_results <- mi_results %>%
+  mutate(
+    mi_value = format(as.numeric(mi_value), scientific = FALSE, digits = 5)
+  ) %>%
+  arrange(desc(as.numeric(mi_value)))
+
+# Display results
+print(mi_results)
+
+```
+
+### Logistic Regression
+
+```{r}
+
+# Train the logistic regression model
+model <- glm(EVT ~ age + bp_systolic + pulse + blood_glucose + temperature + TOO + 
+             gender + medication_anticoags + medication_antiplatelets + 
+             exclusion_TOO + pupil_reaction_abnormal + pre_existing_neurological_deficit +
+             vigilance_4ISS + gaze_head_deviation_4ISS + hemiparesis_4ISS + aphasia_dysarthria_4ISS, 
+             data = stroke_triage_data, 
+             family = binomial)
+
+# Extract the model summary and coefficients matrix
+summary_model <- summary(model)
+coefficients <- summary_model$coefficients
+
+# Remove the intercept row by using its row name
+coefficients <- coefficients[rownames(coefficients) != "(Intercept)", ]
+
+# Calculate Wald statistics
+wald_stats <- (coefficients[, "Estimate"] / coefficients[, "Std. Error"])^2
+
+# Calculate odds ratios
+odds_ratios <- exp(coefficients[, "Estimate"])
+
+# Calculate 95% confidence intervals and remove the intercept using row names
+conf_int <- exp(confint(model))
+conf_int <- conf_int[rownames(coefficients), ]
+
+# (Optional) Clean up predictor names if needed (e.g., remove trailing digits)
+rownames(coefficients) <- gsub("1$", "", rownames(coefficients))
+
+# Combine all information into a single data frame
+results <- data.frame(
+  B = coefficients[, "Estimate"],
+  SE = coefficients[, "Std. Error"],
+  Wald = wald_stats,
+  p = coefficients[, "Pr(>|z|)"],
+  `Exp(B)` = odds_ratios,
+  `95% CI Lower` = conf_int[, 1],
+  `95% CI Upper` = conf_int[, 2]
+)
+
+# Display the results
+print(results)
+
+```
+
+**Variance Inflation Factors**
+
+Before performing the logistic regression, the Variance Inflation Factor (VIF) was evaluated for each predictor to assess multicollinearity. The VIF values for the predictors ranged from 1.08 to 2.25, which are below the advised threshold of 10. This indicates that multicollinearity is not a significant issue in this model, allowing for reliable estimates of the coefficients.
+
+```{r}
+
+# Fit a reduced model excluding pupil_reaction_abnormal
+model_vif <- glm(EVT ~ age + bp_systolic + pulse + blood_glucose + temperature + 
+                 TOO + gender + medication_anticoags + medication_antiplatelets + 
+                 exclusion_TOO + pre_existing_neurological_deficit +
+                 vigilance_4ISS + gaze_head_deviation_4ISS + hemiparesis_4ISS + 
+                 aphasia_dysarthria_4ISS, 
+                 data = stroke_triage_data, 
+                 family = binomial)
+
+# Calculate VIF values (only for multicollinearity check)
+vif_values <- vif(model_vif)
+
+# Show results
+print(vif_values)
+
+```
+
+### Stacked Bar Chart of Feature Relevance Assessment
+
+#### Numerical Variables
+
+**Calculate the Boundaries of the Groups**
+
+Use the min max values to separate the scale into x groups.
+
+```{r}
+
+stroke_triage_data %>%
+  select(age, bp_systolic, pulse, blood_glucose, temperature, TOO) %>%
+  summarise(across(everything(), list(min = ~min(.x, na.rm = TRUE), max = ~max(.x, na.rm = TRUE))))
+
+```
+
+```{r}
+
+# Given min and max values for each variable
+age_min <- 20
+age_max <- 99
+bp_systolic_min <- 84
+bp_systolic_max <- 250
+pulse_min <- 42
+pulse_max <- 198
+blood_glucose_min <- 40
+blood_glucose_max <- 485
+temperature_min <- 34.4
+temperature_max <- 39.1
+TOO_min <- 0.2
+TOO_max <- 46.8
+
+# Number of groups for each variable
+n_age_groups <- 5
+n_bp_systolic_groups <- 4
+n_pulse_groups <- 4
+n_blood_glucose_groups <- 4
+n_temperature_groups <- 2
+n_TOO_groups <- 4
+
+# Define the intervals for each category, rounding to the nearest whole number
+age_breaks <- round(seq(age_min, age_max, length.out = n_age_groups + 1))
+bp_systolic_breaks <- round(seq(bp_systolic_min, bp_systolic_max, length.out = n_bp_systolic_groups + 1))
+pulse_breaks <- round(seq(pulse_min, pulse_max, length.out = n_pulse_groups + 1))
+blood_glucose_breaks <- round(seq(blood_glucose_min, blood_glucose_max, length.out = n_blood_glucose_groups + 1))
+temperature_breaks <- round(seq(temperature_min, temperature_max, length.out = n_temperature_groups + 1), 1)
+TOO_breaks <- round(seq(TOO_min, TOO_max, length.out = n_TOO_groups + 1), 1)
+
+# Create labels based on these intervals
+age_labels <- paste(head(age_breaks, -1), "-", tail(age_breaks, -1), sep = "")
+bp_systolic_labels <- paste(head(bp_systolic_breaks, -1), "-", tail(bp_systolic_breaks, -1), sep = "")
+pulse_labels <- paste(head(pulse_breaks, -1), "-", tail(pulse_breaks, -1), sep = "")
+blood_glucose_labels <- paste(head(blood_glucose_breaks, -1), "-", tail(blood_glucose_breaks, -1), sep = "")
+temperature_labels <- paste(head(temperature_breaks, -1), "-", tail(temperature_breaks, -1), sep = "")
+TOO_labels <- paste(head(TOO_breaks, -1), "-", tail(TOO_breaks, -1), sep = "")
+
+# Create variable labels with units for numeric variables
+numeric_variable_labels <- c(
+    age_groups = "Age",
+    bp_systolic_groups = "Systolic BP (mmHg)",
+    pulse_groups = "Heart Rate",
+    blood_glucose_groups = "Blood Glucose (mg/dL)",
+    temperature_groups = "Body Temperature (°C)",
+    TOO_groups = "Time of Onset (Hours)"
+)
+
+# Create a new DataFrame and apply categorizations using the custom breaks
+stroke_triage_data_grouped <- stroke_triage_data %>%
+  mutate(age_groups = factor(cut(age, breaks = age_breaks, labels = age_labels, include.lowest = TRUE)),
+         bp_systolic_groups = factor(cut(bp_systolic, breaks = bp_systolic_breaks, labels = bp_systolic_labels, include.lowest = TRUE)),
+         pulse_groups = factor(cut(pulse, breaks = pulse_breaks, labels = pulse_labels, include.lowest = TRUE)),
+         blood_glucose_groups = factor(cut(blood_glucose, breaks = blood_glucose_breaks, labels = blood_glucose_labels, include.lowest = TRUE)),
+         temperature_groups = factor(cut(temperature, breaks = temperature_breaks, labels = temperature_labels, include.lowest = TRUE)),
+         TOO_groups = factor(cut(TOO, breaks = TOO_breaks, labels = TOO_labels, include.lowest = TRUE))) 
+
+# Convert the data into long format for numeric variables
+stroke_triage_data_numeric_long <- stroke_triage_data_grouped %>%
+  pivot_longer(cols = c(age_groups, bp_systolic_groups, pulse_groups, blood_glucose_groups, temperature_groups, TOO_groups),
+               names_to = "name",
+               values_to = "value")
+
+# Convert EVT to a factor with labels "No" and "Yes"
+stroke_triage_data_numeric_long$EVT <- factor(stroke_triage_data_numeric_long$EVT, levels = c(0, 1), labels = c("No", "Yes"))
+
+
+ggplot(stroke_triage_data_numeric_long, aes(y = value, fill = EVT)) +
+  geom_bar(position = "fill") +
+  facet_wrap(vars(name), scales = "free", ncol = 2, labeller = labeller(name = numeric_variable_labels)) +
+  scale_fill_manual(values = c("Yes" = "darkgrey", "No" = "white")) +
+  theme(
+    strip.text = element_text(size = 14), 
+    legend.text = element_text(size = 14), 
+    legend.title = element_text(size = 14), 
+    legend.position = "top",
+    axis.text.y = element_text(size = 14) 
+  ) +
+  labs(x = NULL, y = NULL, fill = "EVT Therapy")
+
+
+```
+
+**How Many Instances are in Specific Groups**
+
+Some groups may have a limited number of instances, this could potentially lead to misinterpretation.
+
+```{r}
+
+# List of groups to analyze
+groups <- c("age_groups", "bp_systolic_groups", "pulse_groups", "blood_glucose_groups", "temperature_groups", "TOO_groups")
+
+# Create an empty list to store the results
+group_counts <- list()
+
+# Loop through each group and count occurrences
+for (group in groups) {
+  group_counts[[group]] <- stroke_triage_data_grouped %>%
+    group_by(!!sym(group)) %>%
+    summarise(count = n()) %>%
+    arrange(desc(count))
+}
+
+# Display the counts for each group
+group_counts
+
+```
+
+#### Binary Variables
+
+```{r}
+
+# categorical and binary variables
+categorical_binary_variable_labels <- c(
+    exclusion_TOO = "Clinical Exclusion TOO",
+    medication_anticoags = "Medication Anticoags",
+    medication_antiplatelets = "Medication Antiplatelets",
+    pupil_reaction_abnormal = "Abnormal Pupil Reaction",
+    pre_existing_neurological_deficit = "Pre-existing Neurological Deficit",
+    gender = "Gender"
+)
+
+# Filter variables to include in the plot
+stroke_triage_data_categorical_long <- stroke_triage_data_grouped %>%
+  pivot_longer(cols = c(exclusion_TOO, medication_anticoags, medication_antiplatelets, pupil_reaction_abnormal, pre_existing_neurological_deficit, gender),
+               names_to = "name",
+               values_to = "value")
+
+# Convert EVT to a factor with labels "No" and "Yes"
+stroke_triage_data_categorical_long$EVT <- factor(stroke_triage_data_categorical_long$EVT, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Plot for the selected categorical and binary variables
+ggplot(stroke_triage_data_categorical_long, aes(y = value, fill = EVT)) +
+  geom_bar(position = "fill") +
+  facet_wrap(vars(name), scales = "free", ncol = 2, labeller = labeller(name = categorical_binary_variable_labels)) +
+  scale_fill_manual(values = c("Yes" = "darkgrey", "No" = "white")) + 
+  theme(
+    strip.text = element_text(size = 14),
+    legend.text = element_text(size = 14), 
+    legend.title = element_text(size = 14), 
+    legend.position = "top" 
+  ) +
+  labs(x = NULL, y = NULL, fill = "EVT Therapy")
+
+```
+
+#### 4I-SS Assessments
+
+```{r}
+
+# Define variable labels for 4I-SS items
+four_iss_variable_labels <- c(
+    vigilance_4ISS = "4I-SS Vigilance",
+    gaze_head_deviation_4ISS = "4I-SS Gaze Head Deviation",
+    hemiparesis_4ISS = "4I-SS Hemiparesis",
+    aphasia_dysarthria_4ISS = "4I-SS Aphasia Dysarthria"
+)
+
+# Convert the data into long format for 4I-SS items
+stroke_triage_data_4iss_long <- stroke_triage_data_grouped %>%
+  pivot_longer(cols = c(vigilance_4ISS, gaze_head_deviation_4ISS, hemiparesis_4ISS, aphasia_dysarthria_4ISS),
+               names_to = "name",
+               values_to = "value")
+
+# Convert EVT to a factor with labels "No" and "Yes"
+stroke_triage_data_4iss_long$EVT <- factor(stroke_triage_data_4iss_long$EVT, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Plot for 4I-SS items
+ggplot(stroke_triage_data_4iss_long, aes(y = value, fill = EVT)) +
+  geom_bar(position = "fill") +
+  facet_wrap(vars(name), scales = "free", ncol = 2, labeller = labeller(name = four_iss_variable_labels)) +
+  scale_fill_manual(values = c("Yes" = "darkgrey", "No" = "white")) +
+  theme(
+    strip.text = element_text(size = 14), 
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14), 
+    legend.position = "top" 
+  ) +
+  labs(x = NULL, y = NULL, fill = "EVT Therapy") 
+
+```
+
+Test, if this plot is plausible:
+
+```{r}
+
+stroke_triage_data %>%
+  group_by(gaze_head_deviation_4ISS) %>%
+  summarise(
+    total = n(),
+    evt_count = sum(EVT == 1),
+    evt_percentage = (evt_count / total) * 100
+  )
+
+```
+
+## Wrapper Methods
+
+The interpretation of accuracy and many other metrics is highly influenced by class imbalances. In our dataset, the positive EVT class constitutes only 6% of the total samples. Most feature selection wrapper methods are based on accuracy to identify the most significant features. In an unbalanced dataset, the feature selection process is biased towards predicting the majority class (No EVT), which contradicts our goal. This can lead to a bias towards predicting the "No EVT" class due to its majority presence. However, the aim is to identify variables that can accurately predict the EVT class.
+
+To preserve real-world conditions for model training and evaluation, the class distribution of the training dataset will not be adjusted. For the purpose of feature selection, the EVT class will be balanced to a 50/50 ratio with a total of 600 observations. This involves a combination of oversampling and undersampling techniques. Pure oversampling would generate an excessive number of instances from the 77 positive EVT data points, while pure undersampling would reduce the dataset to only 144 instances. This balanced dataset will enable us to effectively use accuracy-based feature selection packages and understand the influence of each feature on the EVT label in a multivariate context.
+
+**Sampling Methods:**
+
+```{r}
+
+# Sample 300 positive instances with replacement, because we have less than 300 observations
+positive_samples <- stroke_triage_data %>% filter(EVT == 1) %>% sample_n(300, replace = TRUE)
+
+# Sample 300 negative instances without replacement, because we have more than 300 observations
+negative_samples <- stroke_triage_data %>% filter(EVT == 0) %>% sample_n(300)
+
+# Combine the positive and negative samples into a balanced DataFrame
+stroke_triage_data_balanced <- bind_rows(positive_samples, negative_samples)
+
+# Check the distribution of the classes
+table(stroke_triage_data_balanced$EVT)
+
+```
+
+**Three Approaches:**
+
+1.  `caret:` Recursive Feature Elimination (RFE)
+
+2.  `mlr:` Sequential Feature Selection
+
+3.  `Boruta:` for Feature Selection
+
+### `caret`
+
+Recursive Feature Elimination (RFE) is a backward selection technique used for feature selection. In this approach, models are iteratively trained by removing the least important features at each step. The model used in our case was a decision tree model.
+
+RFE does not test every possible combination of features. Instead, it starts with all features and systematically removes the least important ones, evaluating the model's performance with different subsets of features using cross-validation. The result is an evaluation of how different subsets of features affect the model's performance, typically measured by accuracy or another performance metric. Cross-validation is employed to ensure robust and reliable performance estimates.
+
+**Train a Random Forest**
+
+```{r}
+
+# Define the control using a backward selection method with decision trees
+control <- caret::rfeControl(
+  functions = caret::rfFuncs, # Using random forest functions for RFE
+  method = "cv",              # Applying cross-validation
+  number = 10,                # Using 10-fold cross-validation
+  saveDetails = TRUE          # Saving detailed information for further analysis
+)
+
+# Run the RFE algorithm
+results <- caret::rfe(
+  stroke_triage_data_balanced[, -which(names(stroke_triage_data_balanced) == "EVT")], # Excluding the target variable 'EVT' from the predictors
+  stroke_triage_data_balanced$EVT,                                                    # Defining the target variable
+  sizes = c(1:16),                                                                    # Evaluating feature subsets ranging from 1 to 16 variables
+  rfeControl = control,                                                               # Applying the previously defined control parameters
+  method = "rpart"                                                                    # Using decision trees for RFE
+)
+
+```
+
+**Printing**
+
+The *caret::rfe* function identifies the most important features. In our case, the most important features were severity of hemiparesis (as measured by the 4-Item Stroke Scale), Time Of Onset, heart rate, patient's age, and systolic blood pressure. The function recommended using 12 out of 16 features, but not information about a pre-existing neurological deficit and information of antiplatelet medication.
+
+```{r}
+
+print(results)
+
+```
+
+**Plot the Results**
+
+```{r}
+
+plot(results, type = c("g", "o"))
+
+```
+
+### `Boruta`
+
+Boruta is a wrapper method that assigns an importance score to each feature in the dataset. Unlike other backward selection techniques, it does not eliminate features but ranks them all. In this thesis, 100 random forest models were trained to compare the mean decrease accuracy of actual features to that of shadow features. The shadow features contain the same values as the actual features but are randomly shuffled. This comparison calculates a z-score, which is plotted on the vertical axis to represent the importance of each feature relative to others. However, this plot only allows for a relative comparison within the features and does not interpret the actual effect. Due to the non-deterministic nature of random forest classifiers and the shuffling process, the results slightly vary with each iteration. The different results are represented using boxplots.
+
+**Create `Boruta` Model**
+
+```{r}
+
+# Set the seed for reproducibility
+set.seed(456)
+
+# Apply the Boruta algorithm
+boruta_output <- Boruta(EVT ~ .,   # EVT is the label, and . indicates that all other variables in the dataset are predictors
+                        data = stroke_triage_data_balanced)   # The dataset used for the Boruta algorithm
+
+
+```
+
+**How Many Random Forest Models were Created?**
+
+```{r}
+
+# How many Random Forrest were created
+print(boruta_output$maxRuns)
+
+```
+
+**Plot Boruta**
+
+```{r}
+
+# Define more readable labels
+label_names <- c("Shadow Min",
+                 "Shadow Mean",
+                 "Shadow Max",
+                 "Neurolog. Deficit",
+                 "Abnormal Pupils",
+                 "Anticoagulants",
+                 "Antiplatelets",
+                 "Gender",
+                 "Speech",
+                 "Exclusion TOO",
+                 "Gaze Head Deviation",
+                 "Vigilance",
+                 "BP Systolic",
+                 "Temperature",
+                 "Pulse",
+                 "Age",
+                 "Blood Glucose",
+                 "Time of Onset",
+                 "Hemiparesis")
+
+# Plot the Boruta output without x-axis and y-axis labels and ticks
+plot(boruta_output,
+     xlab = "",   # Remove x-axis label
+     ylab = "",
+     xaxt = "n",  # Do not draw x-axis ticks and labels
+     yaxt = "n")  # Do not draw y-axis ticks and labels)
+
+# Add the x-axis without labels
+axis(1,
+     at = 1:length(label_names),  # Position ticks at each label position
+     labels = FALSE)  # Do not draw labels on the x-axis
+
+# Add the rotated labels
+text(x = 1:length(label_names),  # x-coordinates for the labels
+     y = par("usr")[3] - 3,  # y-coordinate for the labels, slightly below the plot
+     srt = 45,  # Rotate the text 45 degrees
+     adj = 1,  # Right-align the text
+     labels = label_names,  # The labels to be displayed
+     xpd = TRUE,  # Allow text to be drawn outside the plot region
+     cex = 0.7)  # Scale the size of the labels
+
+# Scale down the y-axis labels
+axis(2,
+     cex.axis = 0.7)  # Scale down the size of the y-axis labels
+
+```
+
+## Intrinsic Methods
+
+We use the intrinsic properties of `randomForest` to evaluate the importance of the features.
+
+```{r}
+
+# Train Random Forest model
+rf_model <- randomForest(EVT ~ ., data = stroke_triage_data_balanced, importance = TRUE)
+
+# Calculate feature importance
+importance_values <- importance(rf_model)
+
+# Display feature importance
+print(importance_values)
+
+# Plot feature importance
+varImpPlot(rf_model)
+
+```
+
+**Export Data for Machine Learning**
+
+Export the ML-Ready Data to `data_manipulation_6_SFS`.
+
+```{r}
+
+write_csv(stroke_triage_data, "data_manipulation_6_SFS.csv")
+
+```
+
+**Export Data for Exploratory Data Analysis**
+
+```{r}
+
+write_csv(stroke_triage_data, here("Code", "Exploratory Data Analysis", "stroke_triage_data_preprocessed.csv"))
+
+```
