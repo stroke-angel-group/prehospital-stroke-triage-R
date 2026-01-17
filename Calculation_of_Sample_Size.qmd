@@ -1,0 +1,96 @@
+---
+title: "Calcualtion of the Needed Sample Size"
+abstract: "We calculated the required sample size using a dual framework addressing both model stability requirements (development cohort) and statistical power for validation (evaluation cohort). The criteria proposed by Riley et al. (2020) were applied to the training set to mitigate overfitting. In parallel, a power analysis based on the DeLong method (DeLong et al., 1988) was performed for the test set."
+format:
+  pdf:
+    latex_engine: xelatex
+    documentclass: scrartcl          
+    toc: true
+    toc-depth: 2
+    number-sections: true          
+    fig-align: center               
+    fontsize: 11pt                 
+    linestretch: 1.3                
+    geometry: margin=2.5cm           
+    code-line-numbers: true 
+execute:
+  echo: true
+  message: false
+  warning: false
+  include: true
+editor: visual
+---
+
+# Sample Size Calculation
+
+We calculated the required sample size using a dual framework addressing both model stability requirements (development cohort) and statistical power for validation (evaluation cohort). The criteria proposed by Riley et al. (2020) were applied to the training set to mitigate overfitting. In parallel, a power analysis based on the DeLong method (DeLong et al., 1988) was performed for the test set.
+
+**Load Libraries**
+
+```{r}
+
+library(pmsampsize) # Sample size train data
+library(pROC)       # Sample size test data
+
+```
+
+## **Calculation Trainings Sample Size by** `pmsampsize`
+
+**Package recommended by Riley et al. (2025)**
+
+Riley, R. D., Ensor, J., Snell, K. I., Archer, L., Whittle, R., Dhiman, P., ... & Collins, G. S. (2025). Importance of sample size on the quality and utility of AI-based prediction models for healthcare. *The Lancet Digital Health*.
+
+**Criteria proposed by Riley et al. (2018)**
+
+Riley, R. D., Snell, K. I., Ensor, J., Burke, D. L., Harrell Jr, F. E., Moons, K. G., & Collins, G. S. (2019). Minimum sample size for developing a multivariable prediction model: PART II‐binary and time‐to‐event outcomes. *Statistics in medicine*, *38*(7), 1276-1296.
+
+```{r}
+
+pmsampsize::pmsampsize(
+  type = "b",
+  cstatistic = 0.80,
+  prevalence = 0.067,
+  parameters = 14,
+  shrinkage = 0.9
+)
+
+```
+
+## **Calculation Test Sample by** `pROC::power.roc.test`
+
+**Criteria proposed by (DeLong et al., 1988)**
+
+DeLong, E. R., DeLong, D. M., & Clarke-Pearson, D. L. (1988). Comparing the areas under two or more correlated receiver operating characteristic curves: a nonparametric approach. *Biometrics*, 837-845.
+
+```{r}
+
+# Assumptions
+
+auc_ref  <- 0.79 # Reference AUC (State of the Art: 4I-SS stroke scale)
+auc_new  <- 0.84 # Target AUC for the ML model
+alpha    <- 0.05 # Significance level
+power    <- 0.80 # Target statistical power 
+prev     <- 0.066 # Disease prevalence (6.6%)
+kappa    <- (1 - prev) / prev  # Control-to-case ratio (imbalance factor,1 for 50/50)
+
+# Calculate the Necessary Sample Size of the Test Set
+
+resultpROC <- pROC::power.roc.test(
+                auc = c(auc_ref, auc_new),
+                sig.level = alpha,
+                power = power,
+                kappa = kappa,
+               # Assumes paired data (both models tested on same cohort) 
+               # "delong" is suited for a testset validation, 
+               # not external validation of the models
+               method = "delong",
+               alternative = "two.sided")
+
+# Extract results
+sample_size_test_EVT <- resultpROC$ncases
+sample_size_test_non_EVT <- resultpROC$ncontrols
+sample_size_test_total <- sample_size_test_EVT  + sample_size_test_non_EVT
+print(paste("Required EVT in test set:", ceiling(sample_size_test_EVT)))
+print(paste("Total sample size of test set:", ceiling(sample_size_test_total)))
+
+```
