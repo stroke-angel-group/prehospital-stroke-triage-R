@@ -34,11 +34,44 @@ stroke_triage_data <- read_csv(here("Code",
 
 ```
 
+### Load Workflows
+
+```{r}
+
+# Load each workflow directly with here()
+
+final_knn_workflow  <- readRDS(here("Code",
+                                    "Machine Learning",
+                                    "models",
+                                    "final_knn_workflow.rds"))
+
+final_cart_workflow <- readRDS(here("Code",
+                                    "Machine Learning",
+                                    "models",
+                                    "final_cart_workflow.rds"))
+
+final_xgb_workflow  <- readRDS(here("Code",
+                                    "Machine Learning",
+                                    "models",
+                                    "final_xgb_workflow.rds"))
+
+final_rf_workflow   <- readRDS(here("Code",
+                                    "Machine Learning",
+                                    "models",
+                                    "final_rf_workflow.rds"))
+
+final_nn_workflow   <- readRDS(here("Code",
+                                    "Machine Learning",
+                                    "models",
+                                    "final_nn_workflow.rds"))
+
+```
+
 ### Load Models
 
 ```{r}
 
-# Load each model
+# Load each model directly with here()
 
 final_OneR_model <- readRDS(here("Code",
                                  "Machine Learning",
@@ -72,6 +105,8 @@ final_nn_model   <- readRDS(here("Code",
 
 ```
 
+\newpage
+
 # Preprocessing
 
 ## Train-Test Data Split
@@ -79,18 +114,19 @@ final_nn_model   <- readRDS(here("Code",
 ```{r}
 
 # Set seed for reproducible and comparable Train-Test split
+# across different algorithms
 set.seed(456)
 
 # Split the dataset into training and testing sets
-stroke_triage_data_split <- initial_split(stroke_triage_data,
+stroke_trage_data_split <- initial_split(stroke_triage_data,
                                          prop = 0.8,
                                          strata = EVT) 
 
-# create separate dataframes
-train_data <- stroke_triage_data_split %>% training()
-test_data <- stroke_triage_data_split %>% testing()
+# create seperate dataframes
+train_data <- stroke_trage_data_split %>% training()
+test_data <- stroke_trage_data_split %>% testing()
 
-stroke_triage_data_split
+stroke_trage_data_split
 
 ```
 
@@ -102,15 +138,11 @@ Set Data Types for Imputation
 
 # Ensure correct data types for train data
 train_data <- train_data %>%
-  mutate(vigilance_4ISS  = factor(vigilance_4ISS,
-                                  levels = c(0, 1, 2),
-                                  ordered = TRUE),
-gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
-                                  levels = c(0, 1, 2),
-                                  ordered = TRUE),
-        hemiparesis_4ISS = factor(hemiparesis_4ISS,
-                                  levels = c(0, 1, 2),
-                                  ordered = TRUE),
+  mutate(
+    # Ordinal categorical variables (0,1,2)
+    vigilance_4ISS = factor(vigilance_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS, levels = c(0, 1, 2), ordered = TRUE),
 
     # Categorical (non-ordinal) variables
     aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
@@ -126,15 +158,9 @@ gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
 # Apply the same transformations to test data
 test_data <- test_data %>%
   mutate(
-    vigilance_4ISS = factor(vigilance_4ISS,
-                            levels = c(0, 1, 2),
-                            ordered = TRUE),
-    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
-                                      levels = c(0, 1, 2),
-                                      ordered = TRUE),
-    hemiparesis_4ISS = factor(hemiparesis_4ISS,
-                              levels = c(0, 1, 2),
-                              ordered = TRUE),
+    vigilance_4ISS = factor(vigilance_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS, levels = c(0, 1, 2), ordered = TRUE),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS, levels = c(0, 1, 2), ordered = TRUE),
 
     aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
     gender = factor(gender),
@@ -175,12 +201,16 @@ Convert all Factors to Numeric
 #| warning: false
 
 train_data <- train_data %>%
-  mutate(across(where(is.factor), ~ as.numeric(as.character(.))), # Convert factors to numeric
-         EVT = factor(EVT, levels = c("1", "0")))                 # The EVT label as a factor
+  # Convert factors to numeric
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))),
+         # The EVT label as a factor
+         EVT = factor(EVT, levels = c("1", "0"))) 
 
 test_data <- test_data %>%
-  mutate(across(where(is.factor), ~ as.numeric(as.character(.))), # Convert factors to numeric
-         EVT = factor(EVT, levels = c("1", "0")))                 # The EVT label as a factor
+  # Convert factors to numeric
+  mutate(across(where(is.factor), ~ as.numeric(as.character(.))), 
+         # The EVT label as a factor
+         EVT = factor(EVT, levels = c("1", "0")))
 
 ```
 
@@ -237,9 +267,7 @@ test_data <- test_data %>%
 
 ```
 
-## Preprocessing
-
-### Set Data Type for CART and Random Forest
+## Set Data Type for CART and Random Forrest
 
 **CART**
 
@@ -288,25 +316,145 @@ test_data_rf <- test_data %>%
 
 ```
 
-### Create 4I-SS Reference
+## Create 4I-SS Reference
+
+Create a variable with the sum 4I-SS scores of the training set
+
+```{r}
+
+# Calculate 4I-SS score
+score_4ISS_train <- train_data$hemiparesis_4ISS +
+                    train_data$vigilance_4ISS +
+                    train_data$gaze_head_deviation_4ISS +
+                    train_data$aphasia_dysarthria_4ISS
+
+```
 
 The ML model should outperform the 4-Item Stroke Scale (4I-SS). Therefore, the decisions made by the 4I-SS on the same test set need to be calculated and saved in a separate dataframe for comparison.
 
 ```{r}
 
 classification_4ISS <- test_data %>% 
-  mutate(Score_4ISS = hemiparesis_4ISS +
+  mutate(score_4ISS = hemiparesis_4ISS +
            vigilance_4ISS +
            gaze_head_deviation_4ISS +
            aphasia_dysarthria_4ISS,
-         classification_EVT = as_factor(if_else(Score_4ISS > 2, 1, 0))) %>% 
-  select(Score_4ISS, classification_EVT)
+         classification_EVT = as_factor(if_else(score_4ISS > 2, 1, 0))) %>% 
+  select(score_4ISS, classification_EVT)
 
 ```
 
-### Predictions
+## Safe the Labels in a Variable
 
-**OneR**
+```{r}
+
+# Training labels
+label_train <- train_data$EVT
+
+# Test labels
+label_test <- test_data$EVT
+
+```
+
+## Safe the 4I-SS scores in a Variable
+
+```{r}
+
+# 4I-SS scores of train data
+score_4ISS_train <- score_4ISS_train
+
+# 4I-SS scores of test data
+score_4ISS_test  <- classification_4ISS$score_4ISS
+
+```
+
+## Predictions on Train Data (for Calibration)
+
+To reduce overfitting and avoid information leakage, the calibration model (GLM) should be fitted on predictions from the training data rather than on the test data. Ideally, calibration would be performed on an independent validation set. However, the available data is not enough to split the data into a third fully separate dataset.
+
+**Set Data Types**
+
+CART and Random Forrest need some factoral data types for prediction
+
+```{r}
+
+# CART 
+train_data_cart <- train_data %>%
+  mutate(
+    vigilance_4ISS = factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS),
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+    EVT = factor(EVT, levels = c("1", "0"))
+  )
+
+# Random Forest 
+train_data_rf <- train_data %>%
+  mutate(
+    vigilance_4ISS = factor(vigilance_4ISS),
+    gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS),
+    hemiparesis_4ISS = factor(hemiparesis_4ISS),
+    aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+    gender = factor(gender),
+    medication_anticoags = factor(medication_anticoags),
+    exclusion_TOO = factor(exclusion_TOO),
+    pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+    EVT = factor(EVT, levels = c("1", "0"))
+  )
+
+```
+
+**Predictions on Train Data 4I-SS**
+
+Clinical scores are primarily designed for classification (risk stratification) rather than for producing well-calibrated outcome probabilities. Since both the Brier score and decision curve analysis require probabilities, we proceed in two stepsilon: (1) transform the 4I-SS to a 0–1 scale using min–max normalization as an initial probability proxy; (2) calibrate these proxy probabilities to better reflect observed outcome frequencies.
+
+```{r}
+
+# Transform the 4I-SS to a 0–1 scale using min–max normalization
+probabilities_score_4ISS_train <- (score_4ISS_train - min(score_4ISS_train)) / 
+                                  (max(score_4ISS_train) - min(score_4ISS_train))
+
+```
+
+**Predictions on Train Data ML Models**
+
+```{r}
+
+# KNN
+probabilities_knn_train <- predict(final_knn_model, 
+                                   new_data = train_data, 
+                                   type = "prob")$.pred_1
+
+# CART
+probabilities_cart_train <- predict(final_cart_model, 
+                                    new_data = train_data_cart, 
+                                    type = "prob")$.pred_1
+
+# XGBoost
+probabilities_xgb_train <- predict(final_xgb_model, 
+                                   new_data = train_data, 
+                                   type = "prob")$.pred_1
+
+# Random Forest
+probabilities_rf_train <- predict(final_rf_model, 
+                                  new_data = train_data_rf, 
+                                  type = "prob")$.pred_1
+
+# Neural Network
+probabilities_nn_train <- predict(final_nn_model, 
+                                  new_data = train_data, 
+                                  type = "prob")$.pred_1
+
+
+```
+
+## Predictions on Test Data (for Evaluation)
+
+**Predicitons on Test Data OneR**
 
 The One rule from OneR needs to be manually applied to the data, as `predict()` does not work with the model.
 
@@ -319,72 +467,116 @@ OneR_predictions_test <- as_factor(ifelse(test_data$hemiparesis_4ISS == 2, 1, 0)
 test_label <- as_factor(test_data$EVT)
 
 # convert to numerical data to mimic probablities for ROC
-probabilities_OneR <- as.numeric(as.character(OneR_predictions_test))
+probabilities_OneR_test <- as.numeric(as.character(OneR_predictions_test))
 
 ```
 
-**4I-SS**
+**Predictions on Test Data 4I-SS**
+
+Clinical scores are primarily designed for classification (risk stratification) rather than for producing well-calibrated outcome probabilities. Since both the Brier score and decision curve analysis require probabilities, we proceed in two stepsilon: (1) transform the 4I-SS to a 0–1 scale using min–max normalization as an initial probability proxy; (2) calibrate these proxy probabilities to better reflect observed outcome frequencies.
 
 ```{r}
 
-# extract score
-score_4ISS <- classification_4ISS$Score_4ISS
-
-# min/max scaling
-probabilities_score_4ISS <- (score_4ISS - min(score_4ISS)) / (max(score_4ISS) - min(score_4ISS))
-
-# now the values of the 4I-SS can be used as probabilities
-probabilities_score_4ISS
+# Transform the 4I-SS to a 0–1 scale using min–max normalization
+probabilities_score_4ISS_test <- (score_4ISS_test - min(score_4ISS_test)) /                                         (max(score_4ISS_test) - min(score_4ISS_test))
 
 ```
 
-**Other Models**
+**Predictions on Test Data Other Models**
 
 ```{r}
+#| warning: false
 
-probabilities_knn <- predict(final_knn_model,
+# KNN
+probabilities_knn_test <- predict(final_knn_model,
                              new_data = test_data,
                              type = "prob")$.pred_1
 
-probabilities_cart <- predict(final_cart_model,
+# CART
+probabilities_cart_test <- predict(final_cart_model,
                               new_data = test_data_cart,
                               type = "prob")$.pred_1
 
-probabilities_xgb <- predict(final_xgb_model,
+# XGBoost
+probabilities_xgb_test <- predict(final_xgb_model,
                              new_data = test_data,
                              type = "prob")$.pred_1
 
-probabilities_rf <- predict(final_rf_model,
+# Random Forest
+probabilities_rf_test <- predict(final_rf_model,
                             new_data = test_data_rf,
                             type = "prob")$.pred_1
 
-probabilities_nn <- predict(final_nn_model,
+# Neural Network
+probabilities_nn_test <- predict(final_nn_model,
                             new_data = test_data,
                             type = "prob")$.pred_1
 
 ```
 
-### Get the label
+## Store the Predicted Probabilities
+
+We need to use these probabilities later for ROC, PR, Calibration and DCA.
+
+**Store Train Probabilities**
 
 ```{r}
-
-# Actual labels for comparison 
-label_test <- test_data$EVT
+  
+# Training probabilities for fitting calibration models
+calibration_data_train <- tibble(
+    obs         = as.numeric(as.character(label_train)),
+    KNN         = probabilities_knn_train,
+    CART        = probabilities_cart_train,
+    XGB         = probabilities_xgb_train,
+    RF          = probabilities_rf_train,
+    NN          = probabilities_nn_train,
+    score_4ISS  = probabilities_score_4ISS_train
+  )
 
 ```
 
-### Get 4ISS Scores from Testdata
+**Store Test Probabilities**
+
+**For Calibration (without OneR)**
 
 ```{r}
-
-# 4I-SS scores of test data
-score_4ISS <- classification_4ISS$Score_4ISS
+  
+# Test probabilities for calibartion
+calibration_data_test <- tibble(
+    obs         = as.numeric(as.character(label_test)),
+    KNN         = probabilities_knn_test,
+    CART        = probabilities_cart_test,
+    XGB         = probabilities_xgb_test,
+    RF          = probabilities_rf_test,
+    NN          = probabilities_nn_test,
+    score_4ISS  = probabilities_score_4ISS_test
+  )
 
 ```
 
-## ROC and PROC
+**For ROC and PR (without OneR)**
 
-**Used the same** color palette **for both plots**
+```{r}
+
+# Map each model's scores to its name in `model_test_scores` for easy iteration.
+
+model_test_scores <- list(
+  `OneR`  = probabilities_OneR_test,
+  `KNN`   = probabilities_knn_test,
+  `CART`  = probabilities_cart_test,
+  `XGB`   = probabilities_xgb_test,
+  `RF`    = probabilities_rf_test,
+  `NN`    = probabilities_nn_test,
+  `4I-SS` = probabilities_score_4ISS_test
+)
+
+labels <- label_test
+
+```
+
+# ROC and PROC
+
+**Used colors for both plots**
 
 ```{r}
 
@@ -404,27 +596,12 @@ colors_nejm_alpha90 <- c(
 
 ```
 
-**Mapping**
-
-```{r}
-
-# Map each model's scores to its name in `model_scores` for easy iteration.
-labels <- label_test
-model_scores <- list(
-  `OneR`  = probabilities_OneR,
-  `CART`  = probabilities_cart,
-  `KNN`   = probabilities_knn,
-  `XGB`   = probabilities_xgb,
-  `RF`    = probabilities_rf,
-  `NN`    = probabilities_nn,
-  `4I-SS` = probabilities_score_4ISS
-)
-
-```
-
 ### ROC Curve
 
 ```{r}
+
+# Start PDF device for vector output
+pdf(file = "~/Downloads/roc_curve.pdf", width = 6, height = 6)
 
 # Configure plotting layout and text scaling
 par(mfrow = c(1, 1),  # single panel
@@ -438,10 +615,10 @@ plot(NULL, xlim = c(0, 100), ylim = c(0, 100),
      main = "")
 
 # Loop through model scores and plot ROC curves
-for (i in seq_along(model_scores)) {
+for (i in seq_along(model_test_scores)) {
   roc_curve <- roc.curve(
-    scores.class0 = model_scores[[i]][labels == 1], 
-    scores.class1 = model_scores[[i]][labels == 0], 
+    scores.class0 = model_test_scores[[i]][labels == 1], 
+    scores.class1 = model_test_scores[[i]][labels == 0], 
     curve = TRUE
   )
   
@@ -456,17 +633,24 @@ abline(0, 1, lty = 2, col = "black", lwd = 2)
 
 # Add legend to distinguish models
 legend("bottomright",
-       legend = names(model_scores),
+       legend = names(model_test_scores),
        col = colors_nejm_alpha90,
        lwd = 3,
        cex = 0.8,
        bty = "n")
+
+
+# Close PDF device to save the file
+dev.off()
 
 ```
 
 ### Precision-Recall Curve
 
 ```{r}
+
+# Start PDF graphics device
+pdf(file = "~/Downloads/pr_curve.pdf", width = 6, height = 6)
 
 # Configure plot layout and text scaling
 par(mfrow = c(1, 1),  # single plot panel
@@ -480,10 +664,10 @@ plot(NULL, xlim = c(0, 100), ylim = c(0, 100),
      main = "")
 
 # Loop through model scores and draw each PR curve
-for (i in seq_along(model_scores)) {
+for (i in seq_along(model_test_scores)) {
   pr_curve <- pr.curve(
-    scores.class0 = model_scores[[i]][labels == 1], 
-    scores.class1 = model_scores[[i]][labels == 0], 
+    scores.class0 = model_test_scores[[i]][labels == 1], 
+    scores.class1 = model_test_scores[[i]][labels == 0], 
     curve = TRUE
   )
   
@@ -500,17 +684,28 @@ abline(h = prevalence, lty = 2, col = "black", lwd = 2)
 
 # Add legend identifying each model curve
 legend("topright",
-       legend = names(model_scores),
+       legend = names(model_test_scores),
        col = colors_nejm_alpha90,
        lwd = 3,
        cex = 0.8,
        bty = "n")
 
+
+# Close PDF device to finalize file
+dev.off()
+
 ```
 
 ### Combined Presentation
 
+**Create Combined PDF**
+
 ```{r}
+
+# Start PDF device for vector output
+pdf(file = "~/Downloads/roc_pr_curve.pdf",
+    width = 12,
+    height = 6)
 
 # Plot configurations for 1x2 layout
 par(mfrow = c(1, 2),
@@ -522,10 +717,10 @@ plot(NULL, xlim = c(0, 100), ylim = c(0, 100),
      xlab = "1 - Specificity (%)", 
      ylab = "Sensitivity (%)")
 
-for (i in seq_along(model_scores)) {
+for (i in seq_along(model_test_scores)) {
   roc_curve <- roc.curve(
-    scores.class0 = model_scores[[i]][labels == 1], 
-    scores.class1 = model_scores[[i]][labels == 0], 
+    scores.class0 = model_test_scores[[i]][labels == 1], 
+    scores.class1 = model_test_scores[[i]][labels == 0], 
     curve = TRUE
   )
   lines(roc_curve$curve[, 1] * 100, 
@@ -537,7 +732,7 @@ for (i in seq_along(model_scores)) {
 abline(0, 1, lty = 2, col = "black", lwd = 2)
 
 legend("bottomright",
-       legend = names(model_scores),
+       legend = names(model_test_scores),
        col = colors_nejm_alpha90,
        lwd = 4,
        seg.len = 0.6,
@@ -546,15 +741,16 @@ legend("bottomright",
        bty = "n",
        inset = c(0.03, 0))
 
+
 # PR curves
 plot(NULL, xlim = c(0, 100), ylim = c(0, 100), 
      xlab = "Recall (%)", 
      ylab = "Precision (%)")
 
-for (i in seq_along(model_scores)) {
+for (i in seq_along(model_test_scores)) {
   pr_curve <- pr.curve(
-    scores.class0 = model_scores[[i]][labels == 1], 
-    scores.class1 = model_scores[[i]][labels == 0], 
+    scores.class0 = model_test_scores[[i]][labels == 1], 
+    scores.class1 = model_test_scores[[i]][labels == 0], 
     curve = TRUE
   )
   lines(pr_curve$curve[, 1] * 100, 
@@ -567,7 +763,7 @@ prevalence <- mean(labels == 1) * 100
 abline(h = prevalence, lty = 2, col = "black", lwd = 2)
 
 legend("topright",
-       legend = names(model_scores),
+       legend = names(model_test_scores),
        col = colors_nejm_alpha90,
        lwd = 4,
        seg.len = 0.6,
@@ -576,9 +772,22 @@ legend("topright",
        bty = "n",
        inset = c(0.03, 0))
 
+
+# Close PDF device
+dev.off()
+
 ```
 
+**Create Combined PNG**
+
 ```{r}
+
+# Start PNG device for raster output
+png(file = "~/Downloads/roc_pr_curve.png",
+    width = 12,
+    height = 6,
+    units = "in",
+    res = 300)
 
 # Plot configurations for 1x2 layout
 par(mfrow = c(1, 2),
@@ -590,10 +799,10 @@ plot(NULL, xlim = c(0, 100), ylim = c(0, 100),
      xlab = "1 - Specificity (%)", 
      ylab = "Sensitivity (%)")
 
-for (i in seq_along(model_scores)) {
+for (i in seq_along(model_test_scores)) {
   roc_curve <- roc.curve(
-    scores.class0 = model_scores[[i]][labels == 1], 
-    scores.class1 = model_scores[[i]][labels == 0], 
+    scores.class0 = model_test_scores[[i]][labels == 1], 
+    scores.class1 = model_test_scores[[i]][labels == 0], 
     curve = TRUE
   )
   lines(roc_curve$curve[, 1] * 100, 
@@ -605,7 +814,7 @@ for (i in seq_along(model_scores)) {
 abline(0, 1, lty = 2, col = "black", lwd = 2)
 
 legend("bottomright",
-       legend = names(model_scores),
+       legend = names(model_test_scores),
        col = colors_nejm_alpha90,
        lwd = 4,
        seg.len = 0.6,
@@ -619,10 +828,10 @@ plot(NULL, xlim = c(0, 100), ylim = c(0, 100),
      xlab = "Recall (%)", 
      ylab = "Precision (%)")
 
-for (i in seq_along(model_scores)) {
+for (i in seq_along(model_test_scores)) {
   pr_curve <- pr.curve(
-    scores.class0 = model_scores[[i]][labels == 1], 
-    scores.class1 = model_scores[[i]][labels == 0], 
+    scores.class0 = model_test_scores[[i]][labels == 1], 
+    scores.class1 = model_test_scores[[i]][labels == 0], 
     curve = TRUE
   )
   lines(pr_curve$curve[, 1] * 100, 
@@ -635,7 +844,7 @@ prevalence <- mean(labels == 1) * 100
 abline(h = prevalence, lty = 2, col = "black", lwd = 2)
 
 legend("topright",
-       legend = names(model_scores),
+       legend = names(model_test_scores),
        col = colors_nejm_alpha90,
        lwd = 4,
        seg.len = 0.6,
@@ -644,6 +853,7 @@ legend("topright",
        bty = "n",
        inset = c(0.03, 0))
 
+# Close PNG device
 dev.off()
 
 ```
@@ -652,31 +862,25 @@ dev.off()
 
 ```{r}
 
+
 # Initialize a data frame to store AUC values
 auc_table <- data.frame(Model = character(), ROC_AUC = numeric(), PR_AUC = numeric(), stringsAsFactors = FALSE)
 
 # Calculate ROC AUC and PR AUC values for each model
-for (model_name in names(model_scores)) {
-  
+for (model_name in names(model_test_scores)) {
   # ROC AUC
-  roc_result <- roc(labels,
-                    model_scores[[model_name]],
-                    levels = c(0, 1),
-                    direction = "<")
-  
-  roc_auc_value <- as.numeric(auc(roc_result))  
+  roc_result <- roc(labels, model_test_scores[[model_name]], levels = c(0, 1), direction = "<")
+  roc_auc_value <- as.numeric(auc(roc_result))  # Convert ROC AUC to numeric
   
   # PR AUC
-  pr_result <- pr.curve(scores.class0 = model_scores[[model_name]][labels == 1], 
-                        scores.class1 = model_scores[[model_name]][labels == 0], 
+  pr_result <- pr.curve(scores.class0 = model_test_scores[[model_name]][labels == 1], 
+                        scores.class1 = model_test_scores[[model_name]][labels == 0], 
                         curve = FALSE)
   pr_auc_value <- pr_result$auc.integral  # Extract PR AUC
   
   # Store the AUC values in the table
   auc_table <- auc_table %>%
-    add_row(Model = model_name,
-            ROC_AUC = roc_auc_value,
-            PR_AUC = pr_auc_value)
+    add_row(Model = model_name, ROC_AUC = roc_auc_value, PR_AUC = pr_auc_value)
 }
 
 # Display the AUC table
@@ -684,11 +888,11 @@ print(auc_table)
 
 ```
 
-## Risk Group Analysis
+## Sociodemographic Subgroup Risk Analysis
 
 **Create Datasets**
 
-For OneR, kNN and Neural Network
+For OneR, kNN, ANN
 
 ```{r}
 
@@ -726,22 +930,21 @@ train_data_risk_rf <- train_data_risk %>% mutate(
 
 ```
 
-### **Generate Model Predictions**
+### Generate Model Predictions
 
 Predictions are generated for each model on the test data.
 
 The age column is removed to prevent any influence on classification, as it was not included in the training data.
 
 ```{r}
+#| message: false
 
 # Generate predictions for each model on the training data with risk groups
 
 # OneR model predictions using a rule on the hemiparesis feature
 # Here, a hemiparesis score of 2 is assigned a prediction of 1 (positive), otherwise 0 (negative)
 OneR_predictions_train_risk <- factor(ifelse(train_data_risk$hemiparesis_4ISS == 2, 1, 0), levels = c(0, 1))
-
-# Convert factor predictions to numeric probabilities
-OneR_probabilities_risk <- as.numeric(as.character(OneR_predictions_train_risk))  
+OneR_probabilities_risk <- as.numeric(as.character(OneR_predictions_train_risk))  # Convert factor predictions to numeric probabilities
 
 # Generate predictions for the KNN model on train_data_risk
 # Exclude the age_group variable to ensure it doesn’t influence predictions
@@ -780,7 +983,7 @@ names(ANN_probabilities_risk) <- rownames(train_data_risk)
 
 # Combine all model probability predictions into a single list
 # This structure allows for easy access to each model's predictions when calculating ensemble scores or ROC curves
-model_scores_risk <- list(
+model_test_scores_risk <- list(
   OneR = OneR_probabilities_risk,
   KNN = KNN_probabilities_risk,
   XGB = XGB_probabilities_risk,
@@ -812,9 +1015,9 @@ gender_labels <- c("Female", "Male")  # Gender labels for plotting and interpret
 
 ```
 
-**Verify Group Sizes**
+**Verify group sizes**
 
-If groups are too small ROC Curves can be missleading
+If groups are to small ROC Curves can be missleading
 
 ```{r}
 
@@ -838,14 +1041,14 @@ for (i in 1:length(risk_groups$Age)) {
 ```{r}
 
 # Convert the list of model predictions into a data frame
-model_scores_df <- as.data.frame(model_scores_risk)
+model_test_scores_df <- as.data.frame(model_test_scores_risk)
 
 # Compute the ensemble prediction by averaging the predictions across models
-ensemble_predictions <- rowMeans(model_scores_df, na.rm = TRUE)
+ensemble_predictions <- rowMeans(model_test_scores_df, na.rm = TRUE)
 
 ```
 
-**More Preprocessing**
+**Further Preprocessing**
 
 ```{r}
 
@@ -872,14 +1075,14 @@ if (length(na_indices) > 0) {
 
 ```
 
-## **Ensemble Stratified ROC Curves and AUC Values**
+### Ensemble Stratified ROC Curves and AUC Values
 
-**Used Same Colors for Both Plots**
+**Used colors for both plots**
 
 ```{r}
 
-gender_colors_risk <- colors_nejm_alpha90[6:7]  
-age_colors_risk <- colors_nejm_alpha90[3:5]  
+gender_colors_risk <- c("#FFB900FF", "#5773CCFF")
+age_colors_risk <- c("#A1CAF6FF", "#4C6FA1FF", "#1E2F46FF")
 
 ```
 
@@ -887,13 +1090,16 @@ age_colors_risk <- colors_nejm_alpha90[3:5]
 
 ```{r}
 
+# Start PDF device for vector output
+pdf(file = "~/Downloads/roc_risk_gender.pdf", width = 6, height = 6)
+
 # Plot settings
 par(mfrow = c(1, 1),    # single plot
     pty = "s",          # square plotting region
     cex = 1.0)          # base font scaling
 
 # Gender groups and AUC storage
-gender_groups <- c("Female ", "Male")  
+gender_groups <- c("Female ", "Male     ")  
 gender_aucs <- c()  # Empty vector to store AUC values for gender
 
 plot_initialized <- FALSE
@@ -941,7 +1147,10 @@ legend("bottomright",
        lwd = 4,
        cex = 0.8,
        bty = "n",
-       inset = c(-0.1, 0))
+       inset = c(0, 0))
+
+# Close PDF device
+dev.off()
 
 ```
 
@@ -949,8 +1158,8 @@ legend("bottomright",
 
 ```{r}
 
-# Define colors for age groups using the Acadia palette
-age_colors_risk <- colors_nejm_alpha90[3:5]  # Next three colors for age groups
+# Open PDF device for vector output
+pdf(file = "~/Downloads/roc_risk_age.pdf", width = 6, height = 6)
 
 # Plot configuration
 par(mfrow = c(1, 1),  # single plot panel
@@ -959,7 +1168,7 @@ par(mfrow = c(1, 1),  # single plot panel
 
 # Age Group ROC Curves 
 age_groups <- unique(train_data_risk$age_group)
-age_group_labels <- c("< 60    ", "60 - 80", "> 80    ")
+age_group_labels <- c("     < 60", " 60 - 80", "     > 80")
 age_aucs <- c()  # Empty vector to store AUC values
 
 plot_initialized <- FALSE
@@ -1008,13 +1217,21 @@ legend("bottomright",
        lwd = 4,
        cex = 0.8,
        bty = "n",
-       inset = c(-0.1, 0))
+       inset = c(0, 0))
+
+# Close PDF device to save
+dev.off()
 
 ```
 
 ### Combined Presentation
 
+**Create Combine Risk PDF**
+
 ```{r}
+
+# Open PDF device (safer and fully reproducible)
+pdf(file = "~/Downloads/roc_risk.pdf", width = 12, height = 6)
 
 # Configure a 1x2 plotting layout and increase font size globally
 par(mfrow = c(1, 2),
@@ -1022,7 +1239,7 @@ par(mfrow = c(1, 2),
     cex = 1.2)
 
 # Gender Group ROC Curves
-gender_groups <- c("Female ", "Male")  
+gender_groups <- c("Female ", "Male     ")  
 gender_aucs <- c()
 plot_initialized <- FALSE
 
@@ -1033,12 +1250,8 @@ for (i in 1:length(gender_groups)) {
   ensemble_predictions_subgroup <- ensemble_predictions[indices]
   if (length(unique(EVT_labels_subgroup)) < 2) next
 
-  ensemble_roc_subgroup <- roc(EVT_labels_subgroup,
-                               ensemble_predictions_subgroup,
-                               levels = c(0, 1),
-                               direction = "<",
-                               percent = TRUE)
-  
+  ensemble_roc_subgroup <- roc(EVT_labels_subgroup, ensemble_predictions_subgroup,
+                               levels = c(0, 1), direction = "<", percent = TRUE)
   gender_aucs[i] <- round(ensemble_roc_subgroup$auc, 0)
 
   if (!plot_initialized) {
@@ -1062,10 +1275,10 @@ legend("bottomright", legend = gender_labels_with_auc,
        seg.len = 0.6,
        x.intersp = 0.2,
        bty = "n",
-       inset = c(-0.4, 0))
+       inset = c(0, 0))
 
 
-# Age Group ROC Curves
+# --- Age Group ROC Curves ---
 age_groups <- unique(train_data_risk$age_group)
 age_group_labels <- c("    < 60", "60 - 80", "    > 80")
 age_aucs <- c()
@@ -1103,10 +1316,1135 @@ legend("bottomright", legend = age_labels_with_auc,
        seg.len = 0.6,
        x.intersp = 0.2,
        bty = "n",
-       inset = c(-0.38, 0))
+       inset = c(0, 0))
 
 # Reset layout to default
 par(mfrow = c(1, 1))
+
+# Close PDF device
+dev.off()
+
+```
+
+**Create Combine Risk PNG**
+
+```{r}
+
+png(file = "~/Downloads/roc_risk.png",
+    width = 12,
+    height = 6,
+    units = "in",
+    res = 300)
+
+par(mfrow = c(1, 2),
+    pty = "s",
+    cex = 1.2)
+
+# Gender Group ROC Curves
+gender_groups <- c("Female ", "Male     ")
+gender_aucs <- c()
+
+# Base R plot frame (same as ROC/PR)
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100),
+     xlab = "1 - Specificity (%)",
+     ylab = "Sensitivity (%)")
+
+for (i in 1:length(gender_groups)) {
+  gender_code <- as.character(i - 1)
+  indices <- which(train_data_risk$gender == gender_code)
+  EVT_labels_subgroup <- EVT_labels[indices]
+  ensemble_predictions_subgroup <- ensemble_predictions[indices]
+  if (length(unique(EVT_labels_subgroup)) < 2) next
+
+  ensemble_roc_subgroup <- roc(EVT_labels_subgroup, ensemble_predictions_subgroup,
+                               levels = c(0, 1), direction = "<", percent = TRUE)
+  gender_aucs[i] <- round(ensemble_roc_subgroup$auc, 0)
+
+  # Draw as lines on base plot (like ROC/PR)
+  lines(100 - ensemble_roc_subgroup$specificities,
+        ensemble_roc_subgroup$sensitivities,
+        col = gender_colors_risk[i], lwd = 4)
+}
+
+abline(0, 1, lty = 2, col = "black", lwd = 2)
+
+gender_labels_with_auc <- paste(gender_groups, "( AUC:", gender_aucs, ")")
+legend("bottomright", legend = gender_labels_with_auc,
+       col = gender_colors_risk, lwd = 4,
+       seg.len = 0.6, x.intersp = 0.2, bty = "n", inset = c(0, 0))
+
+
+# --- Age Group ROC Curves ---
+age_groups <- unique(train_data_risk$age_group)
+age_group_labels <- c("    < 60", "60 - 80", "    > 80")
+age_aucs <- c()
+
+plot(NULL, xlim = c(0, 100), ylim = c(0, 100),
+     xlab = "1 - Specificity (%)",
+     ylab = "Sensitivity (%)")
+
+for (i in 1:length(age_groups)) {
+  age_group <- age_groups[i]
+  indices <- which(train_data_risk$age_group == age_group)
+  EVT_labels_subgroup <- EVT_labels[indices]
+  ensemble_predictions_subgroup <- ensemble_predictions[indices]
+  if (length(unique(EVT_labels_subgroup)) < 2) next
+
+  ensemble_roc_subgroup <- roc(EVT_labels_subgroup, ensemble_predictions_subgroup,
+                               levels = c(0, 1), direction = "<", percent = TRUE)
+  age_aucs[i] <- round(ensemble_roc_subgroup$auc, 0)
+
+  lines(100 - ensemble_roc_subgroup$specificities,
+        ensemble_roc_subgroup$sensitivities,
+        col = age_colors_risk[i], lwd = 4)
+}
+
+abline(0, 1, lty = 2, col = "black", lwd = 2)
+
+age_labels_with_auc <- paste(age_group_labels, "( AUC:", age_aucs, ")")
+legend("bottomright", legend = age_labels_with_auc,
+       col = age_colors_risk, lwd = 4,
+       seg.len = 0.6, x.intersp = 0.2, bty = "n", inset = c(0, 0))
+
+par(mfrow = c(1, 1))
+dev.off()
+
+```
+
+# Calibration Curves
+
+**Introduction in Scikit-Learn**
+
+> When performing classification one often wants to predict not only the class label, but also the associated probability. This probability gives some kind of confidence on the prediction. This example demonstrates how to visualize how well calibrated the predicted probabilities are using calibration curves, also known as reliability diagrams.
+
+<https://scikit-learn.org/stable/auto_examples/calibration/plot_calibration_curve.html>
+
+## Introduction
+
+**1. Discrimination vs Calibration**
+
+Standard Machine Learning (ML) classification models are primarily designed to **rank** or **separate** classes, not to predict exact probabilities. During model training, hyperparameters are typically optimized for metrics like **ROCAUC**, which measures **discrimination** (how well the model distinguishes between sick and healthy) rather than how "true" the predicted percentages are.
+
+**Example:** If a model predicts a probability of 0.11 for all sick patients and 0.10 for all healthy ones, the **ROCAUC is a perfect 1.0**. However, the probabilities are clinically useless because they don't reflect the actual risk.
+
+**2. Systematic Biases in ML Algorithms**
+
+Different algorithms have known tendencies to either overestimate or underestimate risk. This is often an inherent part of their mathematical structure:
+
+-   **Boosting (e.g., XGBoost):** These models aggressively minimize loss, which often pushes probabilities toward the extremes (0 or 1). This results in **Overconfidence**.
+
+-   **Random Forest:** Because it averages the results of many individual trees, it rarely predicts exactly 0 or 1. This tends to pull predictions toward the center, resulting in **Underconfidence**.
+
+-   **Imbalanced Data:** In datasets with low prevalence (e.g., only 8% LVO cases), models are naturally biased toward low probabilities, causing a **systematic shift** in the output scale.
+
+**3. Why Calibration Matters**
+
+If your goal is only simple classification (e.g., "Is it A or B?"), these distorted probabilities might not matter. However, when working with **probability-based metrics**, calibration becomes mandatory:
+
+-   **Brier Score:** Measures the squared distance between the predicted probability and the actual label (0 or 1).
+
+-   **Decision Curve Analysis (DCA):** The x-axis represents clinical **threshold probabilities**. If the model's probabilities are not "real," the Net Benefit calculation fails because you are comparing clinical preferences to distorted algorithm scores.
+
+**4. How Calibration Works (Platt Scaling)**
+
+To fix this, we use a technique called **Calibration** (often via **Platt Scaling**).
+
+We train a second, simpler model—usually a **Logistic Regression (GLM)**—with a specific setup:
+
+-   **Input (Feature):** Just one Feature, the "raw" predicted probabilities from the ML model.
+
+-   **Target (Label):** The actual outcomes (0 or 1).
+
+This transforms the biased ML output into a **calibrated probability** that can be safely used for clinical decision-making.
+
+**5. Impact of Undersampling and Oversampling**
+
+TRIPOD-AI item 13 says:
+
+> "If class imbalance methods were used, state why and how this was done, and any subsequent methods to recalibrate the model or the model predictions."
+
+and the explanation:
+
+> "Imbalance corrections have an impact on model calibration (van den Goorbergh et al, J Am Med Inform Assoc 2022), yielding probability estimates that are too high \[...\] describe the methods used to recalibrate"
+
+The use of undersampling, oversampling and SMOTE results in poorly calibrated and , regarding the probabities, strongly overestimated models (van den Goorbergh et al, J Am Med Inform Assoc 2022).
+
+<https://doi.org/10.1093/jamia/ocac093>
+
+**We exclude the OneR Model from calibration, because the predicted probabilities are not defined.**
+
+## Fit on Out-of-Fold Predictions
+
+Calibration models tend to overfit if they are trained (i.e., finding the sigmoid fits) on the same dataset on which they should also predict the real probabilities. To prevent the model from overfitting, the calibration models are fitted using the probabilities from the cross-validation folds, identical to the model scripts, using identical models and ML workflows (i.e., pipelines).
+
+Here, we find the parameters of the logistic regression model using the training set with 5-fold cross-validation: the model is fit on the training data and applied to the test data. This 5-fold CV approach gives us a better estimate of whether the calibration generalises well to unseen data (here: predictions), similar to standard ML training practices.
+
+This method is similar to the scikit-learn function `CalibratedClassifierCV` and is also proposed in Niculescu-Mizil and Caruana (2005).\
+\
+Niculescu-Mizil, Alexandru, and Rich Caruana. "Obtaining Calibrated Probabilities from Boosting." UAI. Vol. 5. 2005.
+
+**Create CV-Folds**
+
+```{r}
+
+set.seed(456)
+cv_folds <- vfold_cv(train_data,
+                     v = 5,
+                     strata = EVT)
+
+```
+
+**Function for Out-of-Fold (OOF) Predictions**
+
+```{r}
+
+get_oof_predictions <- function(workflow, folds, train_data_full, 
+                                 prep_function = NULL) {
+  
+ map_dfr(1:nrow(folds), function(i) {
+    
+    split <- folds$splits[[i]]
+    train_fold <- training(split)
+    validation_fold <- testing(split)
+    
+    # Convert to factors for CART/RF
+    if (!is.null(prep_function)) {
+      train_fold <- prep_function(train_fold)
+      validation_fold <- prep_function(validation_fold)
+    }
+    
+    # Train model on fold
+    fold_model <- fit(workflow, data = train_fold)
+    
+    # Generate predictions on validation fold
+    preds <- predict(fold_model, new_data = validation_fold, type = "prob")$.pred_1
+    
+    tibble(
+      obs = as.numeric(as.character(validation_fold$EVT)),
+      pred = preds,
+      fold = i
+    )
+  })
+}
+
+# Prep data type function for CART and RF
+
+prep_for_trees <- function(data) {
+  data %>%
+    mutate(
+      vigilance_4ISS = factor(vigilance_4ISS),
+      gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS),
+      hemiparesis_4ISS = factor(hemiparesis_4ISS),
+      aphasia_dysarthria_4ISS = factor(aphasia_dysarthria_4ISS),
+      gender = factor(gender),
+      medication_anticoags = factor(medication_anticoags),
+      exclusion_TOO = factor(exclusion_TOO),
+      pupil_reaction_abnormal = factor(pupil_reaction_abnormal),
+      EVT = factor(EVT, levels = c("1", "0"))
+    )
+}
+
+```
+
+**Generate OOF-Predictions for All Models**
+
+```{r}
+
+# other models do not require special data preparation
+oof_knn <- get_oof_predictions(final_knn_workflow, cv_folds, train_data)
+oof_xgb <- get_oof_predictions(final_xgb_workflow, cv_folds, train_data)
+oof_nn  <- get_oof_predictions(final_nn_workflow, cv_folds, train_data)
+
+# CART and RF require factor variables
+oof_cart <- get_oof_predictions(final_cart_workflow, cv_folds, train_data, 
+                                 prep_function = prep_for_trees)
+oof_rf   <- get_oof_predictions(final_rf_workflow, cv_folds, train_data, 
+                                 prep_function = prep_for_trees)
+
+# 4I-SS with min-max normalization
+oof_4iss <- map_dfr(1:nrow(cv_folds), function(i) {
+  
+  split <- cv_folds$splits[[i]]
+  train_fold <- training(split)
+  validation_fold <- testing(split)
+  
+# Calculate 4I-SS 
+ score_train        <- train_fold$hemiparesis_4ISS +
+                       train_fold$vigilance_4ISS +
+                       train_fold$gaze_head_deviation_4ISS +
+                       train_fold$aphasia_dysarthria_4ISS
+ 
+ score_validation   <- validation_fold$hemiparesis_4ISS +              
+                       validation_fold$vigilance_4ISS +
+                       validation_fold$gaze_head_deviation_4ISS + 
+                       validation_fold$aphasia_dysarthria_4ISS
+   
+  # Min-max normalization using just train fold parameters
+  min_s <- min(score_train)
+  max_s <- max(score_train)
+  
+  tibble(
+    obs = as.numeric(as.character(validation_fold$EVT)),
+    pred = (score_validation - min_s) / (max_s - min_s),
+    fold = i
+  )
+})
+
+```
+
+```{r}
+
+# Fit platt calibration models on OOF-Predictions
+
+calib_knn_scaled  <- glm(obs ~ pred,
+                        data = oof_knn,
+                        family = binomial())
+
+calib_cart_scaled <- glm(obs ~ pred,
+                        data = oof_cart,
+                        family = binomial())
+
+calib_xgb_scaled  <- glm(obs ~ pred,
+                        data = oof_xgb,
+                        family = binomial())
+
+calib_rf_scaled   <- glm(obs ~ pred,
+                        data = oof_rf,
+                        family = binomial())
+
+calib_nn_scaled   <- glm(obs ~ pred,
+                        data = oof_nn,
+                        family = binomial())
+
+```
+
+```{r}
+
+# Predict platt calibrated probabilities 
+
+calibration_data_test$KNN_cal_scaled <- predict(
+  calib_knn_scaled,
+  newdata = tibble(pred = calibration_data_test$KNN),
+  type = "response"
+)
+
+calibration_data_test$CART_cal_scaled <- predict(
+  calib_cart_scaled,
+  newdata = tibble(pred = calibration_data_test$CART),
+  type = "response"
+)
+
+calibration_data_test$XGB_cal_scaled <- predict(
+  calib_xgb_scaled,
+  newdata = tibble(pred = calibration_data_test$XGB),
+  type = "response"
+)
+
+calibration_data_test$RF_cal_scaled <- predict(
+  calib_rf_scaled,
+  newdata = tibble(pred = calibration_data_test$RF),
+  type = "response"
+)
+
+calibration_data_test$NN_cal_scaled <- predict(
+  calib_nn_scaled,
+  newdata = tibble(pred = calibration_data_test$NN),
+  type = "response"
+)
+
+```
+
+**Calibration of Stroke Scales**
+
+Standard stroke scales, such as the 4I-SS, typically output ordinal point values (e.g., 0–7 points) rather than explicit probabilities. Decision Curve Analysis (DCA) fundamentally relies on **threshold probabilities** to calculate the Net Benefit. Consequently, raw score points cannot be directly plotted on the decision curve as they are incompatible with the probability scale of the x-axis.
+
+Furthermore, clinical scores are often **non-linear** in their risk prediction. A score of 5 on a 10-point scale does indicate a 50% probability. For instance, the risk may remain negligible for scores 0–3 (low risk) and rise sharply at a specific "tipping point" (e.g., score $\ge$ 4), what would be a sigmoidal rather than linear relationship.
+
+L**ogistic recalibration** can and should also be applied to clinical scores.
+
+```{r}
+
+# Fit logistic calibration models on train data
+calib_4iss_scaled <- glm(obs ~ pred,
+                        data = oof_4iss,
+                        family = binomial())
+
+
+# Apply calibration to test data
+calibration_data_test$score_4ISS_cal_scaled <- predict(
+  calib_4iss_scaled,
+  newdata = tibble(pred = calibration_data_test$score_4ISS),
+  type = "response"
+)
+
+```
+
+**Export fitted calibration models for Brier score calculation in ML scripts**
+
+```{r}
+
+saveRDS(calib_knn_scaled,  here("Code",
+                                "Machine Learning",
+                                "models",
+                                "calib_knn_scaled.rds"))
+
+saveRDS(calib_cart_scaled, here("Code",
+                                "Machine Learning",
+                                "models",
+                                "calib_cart_scaled.rds"))
+
+saveRDS(calib_xgb_scaled,  here("Code",
+                                "Machine Learning",
+                                "models",
+                                "calib_xgb_scaled.rds"))
+
+saveRDS(calib_rf_scaled,   here("Code",
+                                "Machine Learning",
+                                "models",
+                                "calib_rf_scaled.rds"))
+
+saveRDS(calib_nn_scaled,   here("Code",
+                                "Machine Learning",
+                                "models",
+                                "calib_nn_scaled.rds"))
+
+saveRDS(calib_4iss_scaled, here("Code",
+                                "Machine Learning",
+                                "models",
+                                "calib_4iss_scaled.rds"))
+
+```
+
+## Calibration Curve Before Scaling
+
+**Standard configurations**
+
+```{r}
+
+# Uncalibrated calibration plot data
+models <- c("KNN", "CART", "XGB", "RF", "NN", "4I-SS")
+
+calibration_cols_unscaled <- c(
+  "KNN"   = "KNN",
+  "CART"  = "CART",
+  "XGB"   = "XGB",
+  "RF"    = "RF",
+  "NN"    = "NN",
+  "4I-SS" = "score_4ISS"
+)
+
+# Define model colors
+model_colors <- c(
+  "KNN"    = "#0072B5E6",
+  "CART"   = "#E18727E6",
+  "XGB"    = "#20854EE6",
+  "RF"     = "#7876B1E6",
+  "NN"     = "#6F99ADE6",
+  "4I-SS"  = "#FFDC91E6"
+)
+
+```
+
+**Density plot of predicted and unscaled probabilities**
+
+The dataset is highly imbalanced, which directly affects the distribution of predicted probabilities. This imbalance must be considered when interpreting and processing calibration curves and selecting scaling methods.
+
+```{r}
+
+probabilities_long_format_uncal <- map_dfr(models, function(m) {
+  tibble(
+    model = m,
+    probabilities = calibration_data_test[[ calibration_cols_unscaled[[m]] ]])}) %>%
+    filter(!is.na(probabilities)) %>% 
+    mutate(model = factor(model, levels = models))
+
+```
+
+```{r}
+
+density_plot_probabilities_uncalibrated <- ggplot(
+  probabilities_long_format_uncal,
+  aes(x = probabilities, color = model)) +
+  geom_density(linewidth = 0.9, adjust = 1.0) +
+  scale_color_manual(values = model_colors, name = "Model") +
+  scale_x_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    labels = scales::percent
+  ) +
+  labs(x = "Predicted Probability", y = "Density") +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    axis.title.x = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(t = 10)),
+    axis.title.y = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(r = 10)),
+    panel.grid.minor = element_blank()
+  )
+
+print(density_plot_probabilities_uncalibrated)
+
+```
+
+**Calibration curve before scaling**
+
+```{r}
+#| message: false
+
+# Calibration curve function (equal number of cases per bin)
+calc_calibration_quantile_bins <- function(pred, obs, n_bins = 5) {
+  df <- data.frame(pred = pred, obs = obs)
+  df <- df[!is.na(df$pred) & !is.na(df$obs), ]
+
+  # Assign each case to a quantile bin
+  df$bin_id <- ntile(df$pred, n_bins)
+
+  out <- df %>%
+    group_by(bin_id) %>%
+    summarise(
+      mean_pred = mean(pred),
+      mean_obs  = mean(obs),
+      n = n(),            
+      .groups = "drop"
+    ) %>%
+    arrange(bin_id)
+
+  # Create a readable bin label
+  out$bin <- factor(paste0("Q", out$bin_id), levels = paste0("Q", 1:n_bins))
+
+  out %>%
+    select(bin, mean_pred, mean_obs, n) 
+}
+
+# Build calibration summary (uncalibrated)
+cal_results_before <- map_dfr(models, function(m) {
+  tmp <- calc_calibration_quantile_bins(
+    pred = calibration_data_test[[ calibration_cols_unscaled[[m]] ]],
+    obs  = calibration_data_test$obs,
+    n_bins = 5
+  )
+  tmp$model <- m
+  tmp
+}) %>%
+  mutate(model = factor(model, levels = models)) %>%
+  arrange(model, mean_pred)
+
+```
+
+```{r}
+
+# Plot (uncalibrated)
+calibration_plot_before <- ggplot(
+  cal_results_before,
+  aes(x = mean_pred, y = mean_obs, color = model, group = model)
+) +
+  geom_abline(
+    intercept = 0,
+    slope = 1,
+    linetype = "dashed",
+    color = "grey40",
+    linewidth = 0.8
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(alpha = 0.8) +
+  scale_color_manual(values = model_colors, name = "Model") +
+  scale_x_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    labels = scales::percent
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    labels = scales::percent
+  ) +
+  labs(
+    x = "Mean Predicted Probability",
+    y = "Observed Event Rate",
+    title = NULL
+  ) +
+  coord_fixed(ratio = 1) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    
+    # Legend text styling
+    legend.title = element_text(face = "bold", size = 10),
+    legend.text = element_text(size = 9),
+    
+    axis.title.x = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(t = 10)),
+    axis.title.y = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(r = 10)),
+    panel.grid.minor = element_blank()
+  )
+
+print(calibration_plot_before)
+
+```
+
+**Safe the calibation plot before scaling as png.**
+
+```{r}
+
+ggsave(
+  filename = "~/Downloads/calibration_plot_before.png",
+  plot = calibration_plot_before,       
+  device = "png",
+  width = 8,            
+  height = 5,           
+  units = "in",
+  dpi = 600,              
+  bg = "white"        
+)
+
+```
+
+## Calibration Curve After Scaling
+
+**Density plot of predicted and unscaled probabilities**
+
+The dataset is highly imbalanced, which directly affects the distribution of predicted probabilities. This imbalance must be considered when interpreting and processing calibration curves and selecting scaling methods.
+
+**Standard configurations**
+
+```{r}
+
+calibration_cols_scaled <- c(
+  "KNN"   = "KNN_cal_scaled",
+  "CART"  = "CART_cal_scaled",
+  "XGB"   = "XGB_cal_scaled",
+  "RF"    = "RF_cal_scaled",
+  "NN"    = "NN_cal_scaled",
+  "4I-SS" = "score_4ISS_cal_scaled"
+)
+
+```
+
+```{r}
+
+probabilities_long_format_cal <- map_dfr(models, function(m) {
+  tibble(
+    model = m,
+    probabilities = calibration_data_test[[ calibration_cols_scaled[[m]] ]]
+  )
+}) %>%
+  filter(!is.na(probabilities)) %>%
+  mutate(model = factor(model, levels = models))
+
+```
+
+```{r}
+
+density_plot_probabilities_calibrated <- ggplot(
+  probabilities_long_format_cal,
+  aes(x = probabilities, color = model)
+) +
+  geom_density(linewidth = 0.9, adjust = 1.0) +
+  scale_color_manual(values = model_colors, name = "Model") +
+  scale_x_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    labels = scales::percent
+  ) +
+  labs(x = "Predicted Probability (Calibrated)", y = "Density") +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    axis.title.x = element_text(face = "bold", size = 10, margin = margin(t = 10)),
+    axis.title.y = element_text(face = "bold", size = 10, margin = margin(r = 10)),
+    panel.grid.minor = element_blank()
+  )
+
+print(density_plot_probabilities_calibrated)
+
+```
+
+**Calibration curve after platt scaling**
+
+```{r}
+#| warning: false
+
+# Function to calculate calibration curve data (equal number of cases per bin)
+calc_calibration_after <- function(pred, obs, n_bins = 5) {
+
+  df <- tibble(pred = pred, obs = obs) %>%
+    filter(!is.na(pred), !is.na(obs))
+
+  # Assign each case to a quantile bin (1..n_bins)
+  df <- df %>%
+    mutate(bin_id = ntile(pred, n_bins)) %>%
+    group_by(bin_id) %>%
+    summarise(
+      mean_pred = mean(pred, na.rm = TRUE),
+      mean_obs  = mean(obs,  na.rm = TRUE),
+      n = n(),                    
+      .groups = "drop"
+    ) %>%
+    arrange(bin_id)
+
+  # Create readable bin labels
+  df$bin <- factor(paste0("Q", df$bin_id), levels = paste0("Q", 1:n_bins))
+
+  df %>%
+    select(bin, mean_pred, mean_obs, n) 
+}
+
+
+cal_results_after <- map_dfr(models, function(m) {
+  tmp <- calc_calibration_after(
+    pred = calibration_data_test[[ calibration_cols_scaled[[m]] ]],
+    obs  = calibration_data_test$obs,
+    n_bins = 5
+  )
+  tmp$model <- m
+  tmp
+})
+
+# Set factor levels to control legend order
+cal_results_after <- cal_results_after %>%
+  mutate(model = factor(model, levels = models)) %>%
+  arrange(model, mean_pred)
+
+```
+
+```{r}
+
+# Plot calibration curves 
+calibration_plot_after <- ggplot(
+  cal_results_after,
+  aes(x = mean_pred, y = mean_obs, color = model, group = model)
+) +
+  geom_abline(intercept = 0,
+              slope = 1,
+              linetype = "dashed",
+              color = "grey40",
+              linewidth = 0.8) +
+  geom_line(linewidth = 0.9) +
+  geom_point(alpha = 0.8) +
+  scale_color_manual(values = model_colors, name = "Model") +
+  scale_x_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, 0.2),
+                     labels = scales::percent) +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, 0.2),
+                     labels = scales::percent) +
+  labs(
+    x = "Mean Predicted Probability",
+    y = "Observed Event Rate",
+    title = NULL
+  ) +
+  coord_fixed(ratio = 1) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    
+    # Legend text styling
+    legend.title = element_text(face = "bold", size = 10),
+    legend.text = element_text(size = 9),
+    
+    axis.title.x = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(t = 10)),
+    axis.title.y = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(r = 10)),
+    
+    panel.grid.minor = element_blank()
+  )
+
+print(calibration_plot_after)
+
+```
+
+**Safe the calibration plot after scaling as png.**
+
+```{r}
+
+ggsave(
+  filename = "~/Downloads/calibration_plot_after.png",
+  plot = calibration_plot_after,       
+  device = "png",
+  width = 8,            
+  height = 5,           
+  units = "in",
+  dpi = 600,              
+  bg = "white"        
+)
+
+```
+
+## Combined Presentation
+
+Use `cowplot` for combination
+
+```{r}
+
+# Extract legend from one of the plots
+legend_grob <- cowplot::get_legend(
+  calibration_plot_before +
+    theme(
+      legend.position = "top",
+      legend.title = element_text(face = "bold", size = 10),
+      legend.text  = element_text(size = 9)
+    )
+)
+
+# Remove legends from both plots
+p1 <- calibration_plot_before +
+  labs(title = "Before Platt Scaling") +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 11, hjust = 0.5)
+  )
+
+p2 <- calibration_plot_after +
+  labs(title = "After Platt Scaling") +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 11, hjust = 0.5)
+  )
+
+# Combine: legend on top, plots below
+calibration_final <- wrap_elements(legend_grob) / (p1 | p2) +
+  plot_layout(heights = c(0.08, 1))
+
+print(calibration_final)
+
+```
+
+**Safe the combined calibration plot as png.**
+
+```{r}
+
+ggsave(
+  filename = "~/Downloads/calibration_combined.png",
+  plot = calibration_final,
+  device = "png",
+  width = 9.5,
+  height = 5,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+```
+
+## Quantitative Evaluation
+
+Compare quantitative calibration metrics in a table.
+
+```{r}
+#| warning: false
+
+calc_calib_metrics <- function(data, prob_col, obs_col = "obs", n_bins = 5) {
+  
+  if (!prob_col %in% colnames(data)) return(NULL)
+  
+  probs <- data[[prob_col]]
+  obs   <- data[[obs_col]]
+  
+  brier <- mean((probs - obs)^2)
+  
+  logit_probs <- qlogis(pmin(pmax(probs, 1e-7), 1 - 1e-7))
+  calib_model <- tryCatch(glm(obs ~ logit_probs, family = binomial), error = function(e) NULL)
+  
+  if (!is.null(calib_model)) {
+    intercept <- coef(calib_model)[1]
+    slope     <- coef(calib_model)[2]
+  } else {
+    intercept <- NA
+    slope <- NA
+  }
+  
+  bins <- cut(probs, breaks = seq(0, 1, length.out = n_bins + 1), include.lowest = TRUE)
+  
+  bin_stats <- tibble(prob = probs, obs = obs, bin = bins) %>%
+    group_by(bin) %>%
+    summarise(mean_pred = mean(prob), mean_obs = mean(obs), n = n(), .groups = "drop") %>%
+    mutate(abs_diff = abs(mean_pred - mean_obs), weight = n / length(probs))
+  
+  ece <- sum(bin_stats$weight * bin_stats$abs_diff, na.rm = TRUE)
+  mce <- max(bin_stats$abs_diff, na.rm = TRUE)
+  
+  ici <- tryCatch({
+    loess_fit <- loess(obs ~ probs, degree = 1, span = 0.75)
+    mean(abs(fitted(loess_fit) - probs), na.rm = TRUE)
+  }, error = function(e) NA)
+  
+  tibble(
+    "Brier Score" = brier,
+    "Calib. Intercept" = intercept,
+    "Calib. Slope" = slope,
+    "ECE" = ece,
+    "MCE" = mce,
+    "ICI" = ici
+  )
+}
+
+```
+
+**Unscaled vs. Scaled**
+
+```{r}
+#| warning: false
+
+model_map <- list(
+  "KNN"   = c(raw = "KNN",        platt = "KNN_cal_scaled"),
+  "CART"  = c(raw = "CART",       platt = "CART_cal_scaled"),
+  "XGB"   = c(raw = "XGB",        platt = "XGB_cal_scaled"),
+  "RF"    = c(raw = "RF",         platt = "RF_cal_scaled"),
+  "NN"    = c(raw = "NN",         platt = "NN_cal_scaled"),
+  "4I-SS" = c(raw = "score_4ISS", platt = "score_4ISS_cal_scaled")
+)
+
+results_list <- list()
+
+for (model_name in names(model_map)) {
+  cols <- model_map[[model_name]]
+  for (type in names(cols)) {
+    metrics <- calc_calib_metrics(calibration_data_test, cols[type])
+    if (!is.null(metrics)) {
+      results_list[[paste0(model_name, "_", type)]] <- metrics %>%
+        mutate(
+          Model = model_name,
+          Method = ifelse(type == "raw", "Unscaled", "Scaled")
+        )
+    }
+  }
+}
+
+comparison_table <- bind_rows(results_list) %>%
+  select(Model, Method, `Brier Score`, `Calib. Slope`, `Calib. Intercept`, ECE, MCE, ICI)
+
+print(comparison_table)
+
+```
+
+# Decision Curve Analysis
+
+## Background
+
+**This Paper Explains DCA´s**
+
+Vickers, A. J., van Calster, B., & Steyerberg, E. W. (2019). A simple, step-by-step guide to interpreting decision curve analysis. *Diagnostic and prognostic research*, *3*(1), 18.
+
+https://doi.org/10.1186/s41512-019-0064-7
+
+**DCA is not easy to understand**
+
+*"a well-respected epidemiologist claimed that he had yet to find more than a couple of people in the world who could explain what decision curves meant and that he himself was not clear on their interpretation. We have also attended meetings where presenters have shown a decision curve slide and then commented that they themselves did not actually understand it."*
+
+**What is Net-Benefit?**
+
+$$
+\text{Net Benefit} = \frac{\text{TP} - \text{FP} \times w}{N}
+$$
+
+-   **TP** = True positives
+
+-   **FP** = False positives
+
+-   **w** = harm weight of false positive diagnoses (relative to benefit of true positives)
+
+-   N = total number of patients
+
+**What is the Net Benefit?**
+
+"The “net” in “net benefit” is the same as in “net profit,” that is, income minus expenditure. If, say, a wine importer buys €1m of wine from France and sells it in the USA for \$1.5m, then if the exchange rate is €1 to \$1.25, the net profit is income in dollars (1.5m) − expenditure in euros (1m) × exchange rate (1.25) = \$250,000. Leaving aside, for the sake of simplicity, the issue of risk and the time and trouble to trade, this is equivalent to being given \$250,000 without having to do any trading" (Vickers et. all)
+
+The unit of net benefit is true positives. A net benefit of 0.07, for instance, means “7 true positives for every 100 patients in the target population.
+
+**What does the EVT Probability (here also weight (w)) mean?**
+
+The risk of 10% is an odds of 1:9, so in using a threshold probability of 10% and tells us that undertriage is 9 times worse than overtriage. This can be interpreted as the “number-needed-to-test,” that is, 10% is a number-needed-to-test of 10. In other words, to find one true positive, we accept 9 false positives.
+
+**Intervention for all line:**
+
+The curve intersects both the vertical y-axis and the horizontal x-axis at the prevalence.
+
+-   **Y-axis (threshold = 0):** At this point, the harm of a false positive is weighted as zero, meaning it carries no penalty. When we treat everyone without testing, only those who actually have the disease (equal to the prevalence) benefit. The false positives cause no weighted harm and therefore don't reduce the net benefit, leaving it equal to the prevalence.
+
+-   **X-axis (Net benefit = 0):** The "Treat all" curve intersects the x-axis where the net benefit equals zero. At a prevalence of 10%, this occurs at threshold pt = 0.10. Here, we gain benefit from treating 10 truly diseased patients per 100, but we also incur harm from 90 false positives per 100. At this threshold, one false positive is weighted 1/9th as heavily as one true positive (pt/(1-pt) = 0.10/0.90). Therefore, the weighted harm from 90 false positives (90 × 1/9 = 10 units) exactly cancels out the benefit from 10 true positives (10 units), resulting in a net benefit of zero.
+
+**Intervention for none line:**
+
+The curve is horizontal at a net benefit of 0 because no patients receive treatment. Since there are neither true positives nor false positives, the net benefit is 0 across all threshold probabilities.
+
+**Why is “intervention for all” or “intervention for none” a relevant comparison?**
+
+"Intervening for all or no patients, irrespective of test or model results are reasonable clinical strategies in many scenarios. A test or model must be found superior to both of these strategies to justify being used in clinical practice" (Vickers et. all)
+
+**Influence of Sensitivity and Specificity on the DCA:**
+
+Although both sensitivity and specificity influence the net benefit, their relative importance shifts across the threshold spectrum: at lower thresholds (left side of the curve), high sensitivity is more important, whereas at higher thresholds (right side), high specificity becomes more critical—because as the threshold increases, false positives carry greater weight, and specificity directly reduces false positives.
+
+**Recommended by Journals**
+
+DCA has been recommended by top journals, including BMJ, JAMA and PLoS Medicine
+
+## Calculate Net Benefit
+
+Calculate the net benefit for a threshold range of 1% to 99%
+
+```{r}
+#| message: false
+
+dca_results <- dcurves::dca(
+  data = calibration_data_test,
+  formula = obs ~ KNN_cal_scaled + CART_cal_scaled + XGB_cal_scaled + RF_cal_scaled + NN_cal_scaled + score_4ISS_cal_scaled,
+  thresholds = seq(0.01, 0.99, by = 0.01), 
+  label = list(
+    KNN_cal_scaled  = "KNN",
+    CART_cal_scaled = "CART",
+    XGB_cal_scaled  = "XGB",
+    RF_cal_scaled   = "Random Forest",
+    NN_cal_scaled   = "Neural Network",
+    score_4ISS_cal_scaled = "4I-SS"
+  )
+)
+
+```
+
+## Plot DCA
+
+```{r}
+
+# Preparation
+plot_data <- as_tibble(dca_results) %>%
+  mutate(
+    # Rename default dca labels 
+    label = dplyr::case_match(label,
+      "Treat All"  ~ "Intervention for all",
+      "Treat None" ~ "Intervention for none",
+      .default = label
+    ),
+    # Set the exact order for the legend
+    label = factor(label, levels = c(
+      "KNN",
+      "CART",
+      "XGB",
+      "Random Forest",
+      "Neural Network",
+      "4I-SS",
+      "Intervention for all",
+      "Intervention for none"
+    )),
+    # Convert Net Benefit to "per 100 patients"
+    net_benefit = net_benefit * 100 
+  )
+
+# Separate data to control layers individually
+baselines <- c("Intervention for all", "Intervention for none")
+data_models <- plot_data %>% filter(!label %in% baselines)
+data_baselines <- plot_data %>% filter(label %in% baselines)
+
+# DCA Plotting
+dca_plot <- ggplot() +
+  
+  # Layer 1: ML Models
+  geom_line(
+    data = data_models,
+    aes(x = threshold, y = net_benefit, color = label),
+    linewidth = 0.7,
+    linetype = "solid"
+  ) +
+  
+  # Layer 2: Reference Strategies
+  geom_line(
+    data = data_baselines,
+    aes(x = threshold, y = net_benefit, linetype = label),
+    linewidth = 0.7,
+    color = "grey40" 
+  ) +
+  
+  # Colors for the models
+  scale_color_manual(
+    name = "Preclinical Triage Strategies",
+    values = c(
+      "KNN"            = "#0072B5E6",
+      "CART"           = "#E18727E6",
+      "XGB"            = "#20854EE6",
+      "Random Forest"  = "#7876B1E6",
+      "Neural Network" = "#6F99ADE6",
+      "4I-SS"          = "#FFDC91E6"
+    )
+  ) +
+  
+  # Linetypes
+  scale_linetype_manual(
+    name = "Reference Strategies",
+    values = c(
+      "Intervention for all"  = "dashed",
+      "Intervention for none" = "solid"
+    )
+  ) +
+  
+  # Define Legend Order and Layout
+  guides(
+    color = guide_legend(order = 1),    # Models lines on top
+    linetype = guide_legend(order = 2)  # References lines behind
+  ) +
+  
+  # Axis Scaling
+  coord_cartesian(ylim = c(-1.5, 8), xlim = c(0, 0.50)) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  
+  # Labels
+  labs(
+    x = "Minimize Undertriage      <-       Probability of EVT       ->      Minimize Overtriage",
+    y = "Net Benefit (per 100 patients)",
+    title = NULL
+  ) +
+  
+  # Theme Settings
+  theme_minimal() +
+  theme(
+    # Legend positioning
+    legend.position = "right", 
+    legend.box = "vertical", 
+    legend.box.just = "left",
+    legend.margin = margin(t = 0, b = 0),
+    legend.spacing.y = unit(0.5, "cm"),
+    
+    # Legend text styling
+    legend.title = element_text(face = "bold",
+                                size = 10),
+    legend.text = element_text(size = 9),
+    
+    # Axis titles 
+    axis.title.x = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(t = 10)),
+    axis.title.y = element_text(face = "bold",
+                                size = 10,
+                                margin = margin(r = 8))
+  )
+
+# Print Plot
+print(dca_plot)
+
+```
+
+**Safe the DCA as png.**
+
+```{r}
+
+ggsave(
+  filename = "~/Downloads/DCA_analysis_all_models.png",
+  plot = dca_plot,       
+  device = "png",
+  width = 8,            
+  height = 5,           
+  units = "in",
+  dpi = 600,              
+  bg = "white"        
+)
 
 ```
 
@@ -1118,6 +2456,22 @@ This section compares the bootstrap distributions and confidence intervals of pe
 
 We define a custom function to calculate all performance metrics for each bootstrapped dataset. This function will be called by \`boot::boot()\` for each of the 5,000 resamples.
 
+```{r}
+
+# Define model colors matching the ROC curves
+colors_nejm_alpha90 <- c(
+       "#BC3C29E6",
+       "#E18727E6",
+       "#0072B5E6",
+       "#20854EE6", 
+       "#7876B1E6",
+       "#6F99ADE6",
+       "#FFDC91E6",
+       "#EE4C97E6"
+       )
+
+```
+
 **Choose Model Thresholds from the ML-Scripts**
 
 ```{r}
@@ -1128,8 +2482,23 @@ model_thresholds <- c(
   "CART"  = 0.4,  
   "XGB"   = 0.4,   
   "RF"    = 0.4,   
-  "NN"    = 0.4,   
+  "NN"    = 0.45,   
   "4I-SS" = 2/7   # 2/7 equals Score > 2
+)
+
+```
+
+Map raw-model column names -\> calibrated column names (only for Brier)
+
+```{r}
+
+cal_map <- c(
+  "KNN"   = "KNN_cal_scaled",
+  "CART"  = "CART_cal_scaled",
+  "XGB"   = "XGB_cal_scaled",
+  "RF"    = "RF_cal_scaled",
+  "NN"    = "NN_cal_scaled",
+  "4I-SS" = "score_4ISS_cal_scaled"
 )
 
 ```
@@ -1141,17 +2510,29 @@ We create a dataframe with the label (ground truth), all observations of the tes
 ```{r}
 
 # Combines truth and probabilities/scores from all models
-data_for_bootstrapping <- tibble(
-     EVT     = label_test,
-     OneR    = model_scores$OneR,
-     CART 
-   = model_scores$CART,
-     KNN     = model_scores$KNN,
-     XGB     = model_scores$XGB,
-     RF      = model_scores$RF,
-     NN      = model_scores$NN,
-     `4I-SS` = model_scores$`4I-SS`
+data_for_bootstrapping <- as.data.frame(
+  list(
+    EVT     = label_test,
+    OneR    = model_test_scores$OneR,
+    CART    = model_test_scores$CART,
+    KNN     = model_test_scores$KNN,
+    XGB     = model_test_scores$XGB,
+    RF      = model_test_scores$RF,
+    NN      = model_test_scores$NN,
+    `4I-SS` = model_test_scores$`4I-SS`,
+    
+# calibrated probs (only for Brier)
+
+    CART_cal_scaled       = calibration_data_test$CART_cal_scaled,
+    KNN_cal_scaled        = calibration_data_test$KNN_cal_scaled,
+    XGB_cal_scaled        = calibration_data_test$XGB_cal_scaled,
+    RF_cal_scaled         = calibration_data_test$RF_cal_scaled,
+    NN_cal_scaled         = calibration_data_test$NN_cal_scaled,
+    score_4ISS_cal_scaled = calibration_data_test$score_4ISS_cal_scaled
+  ),
+  check.names = FALSE
 )
+
 
 # Check the data structure
 head(data_for_bootstrapping)
@@ -1166,48 +2547,84 @@ We define a custom function to calculate all performance metrics for each bootst
 
 calc_boot_metrics_all_models <- function(data, indices) {
 
-  # Resample data for paired bootstrapping
+  # Bootstrap resample
   d <- data[indices, ]
-  model_names <- names(model_thresholds)
+
+  # True labels (factor)
+  truth_raw <- factor(as.character(d$EVT), levels = c("0", "1"))
+
+  # True labels (numeric)
+  truth_num <- ifelse(truth_raw == "1", 1, 0)
+
+  # Store metrics
   results <- c()
 
-  for (model in model_names) {
-    probs <- d[[model]]
-    truth <- d$EVT
-    thresh <- model_thresholds[[model]]
+  for (model in names(model_thresholds)) {
 
-    # Apply model-specific threshold for binary classification
-    pred_class <- factor(ifelse(probs > thresh, "1", "0"),
-                         levels = c("1", "0"))
+      # Model scores
+      probs_raw <- d[[model]]
 
-    # Calculate threshold-independent metrics
-    roc_obj <- pROC::roc(truth,
-                         probs,
-                         levels = c("0", "1"),
-                         direction = "<",
-                         quiet = TRUE)
-    
-    aucroc <- as.numeric(roc_obj$auc)
+      # Decision threshold
+      thresh <- model_thresholds[[model]]
 
-    pr_obj <- PRROC::pr.curve(scores.class0 = probs[truth == "1"],
-                              scores.class1 = probs[truth == "0"],
-                              curve = FALSE)
-    aucpr <- pr_obj$auc.integral
+      # Class predictions
+      pred_class <- factor(ifelse(probs_raw > thresh, "1", "0"),
+                           levels = c("0", "1"))
 
-    # Calculate threshold-dependent metrics
-    acc  <- yardstick::accuracy_vec(truth, pred_class)
-    sens <- yardstick::sensitivity_vec(truth, pred_class, event_level = "first")
-    spec <- yardstick::specificity_vec(truth, pred_class, event_level = "first")
-    ppv  <- yardstick::precision_vec(truth, pred_class, event_level = "first")
-    npv  <- yardstick::npv_vec(truth, pred_class, event_level = "first")
-    f1   <- yardstick::f_meas_vec(truth, pred_class, event_level = "first")
+      # Create Confusion matrix (calucate most metrics)
+      cm <- caret::confusionMatrix(pred_class, truth_raw, positive = "1")
 
-    
-    # Add metrics to resulting vector 
-    results <- c(results, aucroc, aucpr, acc, sens, spec, f1, ppv, npv)
+      # PR input
+      pr_df <- tibble(truth = truth_raw, prob = probs_raw)
+
+      # ROC AUC
+      aucroc <- as.numeric(pROC::auc(pROC::roc(
+        response  = truth_raw,
+        predictor = probs_raw,
+        levels    = c("0", "1"),
+        direction = "<",
+        quiet     = TRUE
+      )))
+
+      # PR curve
+      pr_obj <- PRROC::pr.curve(
+        scores.class0 = probs_raw[truth_raw == "1"],
+        scores.class1 = probs_raw[truth_raw == "0"]
+      )
+
+      # PR AUC
+      AUPRC <- as.numeric(pr_obj$auc.integral)
+
+      # Brier score
+      if (model == "OneR") {
+        brier <- NA_real_
+      } else {
+        cal_col <- unname(cal_map[model])
+        if (is.na(cal_col) || !(cal_col %in% names(d))) {
+          brier <- NA_real_
+        } else {
+          cal_probs <- d[[cal_col]]
+          brier <- mean((truth_num - cal_probs)^2, na.rm = TRUE)
+        }
+      }
+
+      # Collect outputs
+      results <- c(
+        results,
+        AUCROC        = aucroc,
+        AUPRC         = AUPRC,
+        Accuracy      = as.numeric(cm$overall["Accuracy"]),
+        Sensitivity   = as.numeric(cm$byClass["Sensitivity"]),
+        Specificity   = as.numeric(cm$byClass["Specificity"]),
+        `Brier Score` = brier,
+        PPV           = as.numeric(cm$byClass["Pos Pred Value"]),
+        NPV           = as.numeric(cm$byClass["Neg Pred Value"])
+      )
+    }
+
+    # Return metrics
+    results
   }
-  return(results)
-}
 
 ```
 
@@ -1221,20 +2638,27 @@ set.seed(456)
 boot_results_all <- boot::boot(
   data = data_for_bootstrapping,
   statistic = calc_boot_metrics_all_models,
-  R = 5000 
+  R = 5000
 )
 
-# Define metrics strictly matching the function output order
+```
+
+Prepare bootstrap samples for plotting
+
+```{r}
+
+# Define metrics names
 calc_order_names <- c("AUCROC",
-                      "AUCPR",
+                      "AUPRC",
                       "Accuracy",
                       "Sensitivity",
                       "Specificity",
-                      "F1",
+                      "Brier Score",
                       "PPV",
-                      "NPV")
+                      "NPV"
+)
 
-model_names <- names(model_thresholds) 
+model_names <- names(model_thresholds)
 
 # Create column mapping
 col_mapping <- expand.grid(Metric = calc_order_names, Model = model_names)
@@ -1242,26 +2666,33 @@ col_mapping <- expand.grid(Metric = calc_order_names, Model = model_names)
 # Convert matrix to a dataframe
 boot_samples_df <- as.data.frame(boot_results_all$t)
 
-# Assign column names
-colnames(boot_samples_df) <- paste(col_mapping$Model, col_mapping$Metric, sep = "_")
+# Define column names
+colnames(boot_samples_df) <- paste(col_mapping$Model,
+                                   col_mapping$Metric,
+                                   sep = "_")
 
 # Define visualization order
 desired_plot_order <- c("AUCROC",
-                        "AUCPR",
+                        "AUPRC",
                         "Accuracy",
                         "Sensitivity",
                         "Specificity",
                         "PPV",
                         "NPV",
-                        "F1")
+                        "Brier Score")
 
 # Transform to long format and set factor levels for plotting
 boot_results_all_long <- boot_samples_df %>%
-  pivot_longer(everything(), names_to = "Model_Metric", values_to = "Value") %>%
-  separate(Model_Metric, into = c("Model", "Metric"), sep = "_", extra = "merge") %>%
+  pivot_longer(everything(),
+               names_to = "Model_Metric",
+               values_to = "Value") %>%
+  separate(Model_Metric,
+           into = c("Model", "Metric"),
+           sep = "_",
+           extra = "merge") %>%
   mutate(
-    Model = factor(Model, levels = model_names),
-    Metric = factor(Metric, levels = desired_plot_order) 
+    Model  = factor(Model, levels = model_names),
+    Metric = factor(Metric, levels = desired_plot_order)
   )
 
 ```
@@ -1270,16 +2701,37 @@ boot_results_all_long <- boot_samples_df %>%
 
 ```{r}
 
-# BCa CI helper that returns lower/upper
+# BCa CI function that returns lower and upper bounds
 get_bca_limits <- function(boot_obj, index, conf) {
-  ci <- boot::boot.ci(boot_obj, type = "bca", conf = conf, index = index)
-  ci$bca[4:5]  # lower, upper
+
+  t_col <- boot_obj$t[, index]
+  t_ok  <- t_col[is.finite(t_col)]
+  if (length(t_ok) < 10) return(c(NA_real_, NA_real_))
+
+  if (!all(is.finite(t_col))) {
+    probs <- c((1-conf)/2, 1-(1-conf)/2)
+    return(as.numeric(stats::quantile(t_ok, probs = probs, na.rm = TRUE)))
+  }
+
+  ci <- tryCatch(
+    boot::boot.ci(boot_obj, type = "bca", conf = conf, index = index),
+    error = function(e) NULL
+  )
+
+  if (is.null(ci) || is.null(ci$bca) || anyNA(ci$bca[4:5])) {
+    probs <- c((1-conf)/2, 1-(1-conf)/2)
+    return(as.numeric(stats::quantile(t_ok, probs = probs, na.rm = TRUE)))
+  }
+
+  ci$bca[4:5] # lower, upper
 }
 
 get_bca_and_mean <- function(boot_obj, index) {
 
   # Calculate the bootstrap mean to include it in the plot
-  boot_mean <- mean(boot_obj$t[, index], na.rm = TRUE)
+  t_col <- boot_obj$t[, index]
+  t_ok  <- t_col[is.finite(t_col)]
+  boot_mean <- mean(t_ok, na.rm = TRUE)
 
   # Calculate uncertainty bands for BCa 95/80/50
   ci95 <- get_bca_limits(boot_obj, index, 0.95)
@@ -1294,8 +2746,27 @@ get_bca_and_mean <- function(boot_obj, index) {
   )
 }
 
-# Build intervals per Model and Metric 
+# Remove Brier Score Values for OneR and the 4I-SS
+# OneR and the 4I-SS are scales and no probabilities, so the Brier Score is not defined
+excluded_brier_models <- c("OneR")
+
+# Build intervals per Model and Metric
 interval_data <- purrr::map_dfr(seq_len(nrow(col_mapping)), function(i) {
+
+  # Keep the row so the model still appears in the Brier facet,
+  # but do not compute BCa; show NA in the Mean column.
+  if (col_mapping$Metric[i] == "Brier Score" &&
+      col_mapping$Model[i] %in% excluded_brier_models) {
+
+    return(tibble::tibble(
+      Model  = col_mapping$Model[i],
+      Metric = col_mapping$Metric[i],
+      mean   = NA_real_,
+      q025   = NA_real_, q975 = NA_real_,
+      q10    = NA_real_, q90  = NA_real_,
+      q25    = NA_real_, q75  = NA_real_
+    ))
+  }
 
   res <- get_bca_and_mean(boot_results_all, index = i)
 
@@ -1309,9 +2780,13 @@ interval_data <- purrr::map_dfr(seq_len(nrow(col_mapping)), function(i) {
   )
 }) %>%
   dplyr::mutate(
-    Model = factor(Model, levels = rev(model_names)),
+    Model  = factor(Model, levels = rev(model_names)),
     Metric = factor(Metric, levels = desired_plot_order),
-    mean_label = sprintf("%.0f", mean)
+    mean_label = dplyr::case_when(
+      is.na(mean) ~ "NA",
+      Metric == "Brier Score" ~ sprintf("%.1f", mean),
+      TRUE ~ sprintf("%.0f", mean)
+    )
   )
 
 # Prepare long bootstrap data (for densities + axis ranges)
@@ -1322,6 +2797,10 @@ plot_data <- boot_results_all_long %>%
     perf   = Value * 100
   )
 
+# Remove rows for OneR only if Metric is Brier Score
+plot_data <- plot_data %>%
+  dplyr::filter(!(Metric == "Brier Score" & Model %in% excluded_brier_models))
+
 # Per-metric x-range for text and headers
 metric_meta <- plot_data %>%
   dplyr::group_by(Metric) %>%
@@ -1330,6 +2809,9 @@ metric_meta <- plot_data %>%
     max_val = max(perf, na.rm = TRUE),
     range   = max_val - min_val,
     .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    range = ifelse(range == 0 | is.na(range), 1, range)  # avoid zero-range issues
   )
 
 interval_data <- interval_data %>%
@@ -1366,23 +2848,21 @@ band_lwd_50 <- 3.4
 
 ```
 
-## Create `ggdist`-Plots
+**Remove Brier Score Values for OneR and the 4I-SS**
+
+OneR and the 4I-SS are scales and no probabilities, so the Brier Score is not defined
 
 ```{r}
 
-# Define model colors matching the ROC curves
-colors_nejm_alpha90 <- c(
-       "#BC3C29E6",
-       "#E18727E6",
-       "#0072B5E6",
-       "#20854EE6", 
-       "#7876B1E6",
-       "#6F99ADE6",
-       "#FFDC91E6",
-       "#EE4C97E6"
-       )
+# Remove rows for OneR only if Metric is Brier Score
+plot_data <- plot_data %>%
+  filter(
+    !(Metric == "Brier Score" & Model %in% c("OneR"))
+  )
 
 ```
+
+## Create `ggdist`-Plots
 
 **Standardize Text Positions for 0-100 Scale**
 
@@ -1390,30 +2870,30 @@ We overwrite the text_x coordinates to ensure alignment across all facets on the
 
 ```{r}
 
-# Position the "Mean" column on the left (e.g., at x = 5%)
-interval_data$text_x <- 5 
-header_data$text_x   <- 5
+# Position the "Mean" column on the left (e.g., at x = 0%)
+interval_data$text_x <- 0 
+header_data$text_x   <- 0
 
-# Position the Metric Titles also on the left (e.g., at x = 5%)
-title_data$text_x    <- 5
+# Position the Metric Titles also on the left (e.g., at x = 0%)
+title_data$text_x    <- 0
 
 ```
 
 **Do the Plot Using `ggplot` and `ggdist`**
 
 ```{r}
+#| warning: false
 
 ridget_plot <- ggplot(plot_data, aes(x = perf, y = Model)) +
 
-  # A. Density
-  ggdist::stat_slab(
-    fill = "grey85",        
-    alpha = 1,
-    color = NA,
-    adjust = 0.8,
-    width = 0.6,            
-    justification = -0.2,   
-    normalize = "groups"    
+  # A. Violine
+  geom_violin(
+    aes(fill = Model, color = Model), 
+    alpha = 0.15,         
+    scale = "width",      
+    trim = TRUE,          
+    linewidth = 0.1,      
+    show.legend = FALSE
   ) +
 
   # B. Intervals
@@ -1437,7 +2917,7 @@ ridget_plot <- ggplot(plot_data, aes(x = perf, y = Model)) +
   geom_point(
     data = interval_data,
     aes(x = mean, y = Model),
-    inherit.aes = FALSE, color = "black", size = 1.5, show.legend = FALSE
+    inherit.aes = FALSE, color = "black", size = 1.2, show.legend = FALSE
   ) +
 
   # D. Numbers Column 
@@ -1469,33 +2949,34 @@ ridget_plot <- ggplot(plot_data, aes(x = perf, y = Model)) +
     data = title_data,
     aes(x = text_x, y = y_pos, label = label),
     inherit.aes = FALSE,
-    size = 4.5,        # bigger than the rest
+    size = 4.5,        
     fontface = "bold",
     color = "black",
-    hjust = 0.5,       # centered
+    hjust = 0.5,       
     vjust = 0
   ) +
 
-  # free_x for 0-100 across all x axis
+  # Faceting
   facet_wrap(~Metric, scales = "free_x", ncol = 2) +
 
-  # Apply NEJM Colors
+  # Colors & Fills
   scale_color_manual(values = model_colors_base) +
-   
-  # Scales from 0 to 100
+  scale_fill_manual(values = model_colors_base) + 
+    
+  # Scales
   scale_x_continuous(
      breaks = seq(0, 100, by = 10),
-     expand = expansion(mult = c(0, 0.05)) 
+     limits = c(-5, 100),
+     expand = expansion(mult = c(0, 0.02)) 
   ) +
-   
+    
   scale_y_discrete(
-    # For more title space
     expand = expansion(mult = c(0.05, 0.45)) 
   ) +
 
-  coord_cartesian(xlim = c(0, 100), clip = "off") +
+  coord_cartesian(xlim = c(-5, 100), clip = "off") +
 
-  labs(x = "Performance (%)", y = NULL) +
+  labs(x = "Bootstrapped Model Performance (%)", y = NULL) +
 
   theme_minimal(base_family = "sans") +
   theme(
@@ -1507,13 +2988,26 @@ ridget_plot <- ggplot(plot_data, aes(x = perf, y = Model)) +
     strip.background = element_blank(),
     axis.text.y = element_text(face = "bold", size = 9, color = "black", hjust = 0),
     axis.text.x = element_text(size = 8, color = "grey30"),
-    axis.title.x = element_text(size = 10, margin = margin(t = 10)),
+    axis.title.x = element_text(face = "bold", size = 9, margin = margin(t = 25)), 
 
     panel.spacing = unit(2.5, "lines"), 
     plot.margin = margin(t = 40, r = 10, b = 10, l = 10)
   )
 
-# Print the plot and supress "Picking joint bandwidth..."
+# Print
 suppressMessages(print(ridget_plot))
+
+```
+
+```{r}
+
+ggsave(
+  filename = "~/Downloads/bootstrapped_distribution_comparison.png",
+  plot = ridget_plot,
+  width = 10,
+  height = 12,
+  dpi = 600,    # very high resolution      
+  bg = "white"  # white backgound       
+)
 
 ```
