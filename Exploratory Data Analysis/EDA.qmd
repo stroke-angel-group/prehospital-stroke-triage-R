@@ -1,25 +1,5 @@
 ---
 title: "Exploratory Data Analysis"
-date: "`r format(Sys.Date(), '%B, %Y')`"
-abstract: |
-  This document serves exploratory data analysis. It includes two data sources: one before feature selection and one after. This allows for separate analysis of data characteristics before and after preprocessing, as well as comparisons between them. The analyses are organized under the sections "Raw Data" and "Preprocessed Data".
-format:
-  pdf:
-    latex_engine: xelatex
-    documentclass: scrartcl
-    toc: true
-    toc-depth: 2
-    number-sections: true
-    fig-align: center
-    fontsize: 11pt
-    linestretch: 1.3
-    geometry: margin=2.5cm
-    code-line-numbers: true
-execute:
-  echo: true
-  message: false
-  warning: false
-  include: true
 editor: visual
 ---
 
