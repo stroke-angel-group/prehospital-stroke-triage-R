@@ -949,24 +949,32 @@ OneR_probabilities_risk <- as.numeric(as.character(OneR_predictions_train_risk))
 # Generate predictions for the KNN model on train_data_risk
 # Exclude the age_group variable to ensure it doesn’t influence predictions
 KNN_probabilities_risk <- predict(final_knn_model, 
-                                  new_data = train_data_risk %>% select(-age_group), 
-                                  type = "prob")$.pred_1  # Extract the predicted probability for class "1"
+                                  new_data = train_data_risk %>%
+                                  select(-age_group), 
+                                  # Extract the predicted probability for class "1"
+                                  type = "prob")$.pred_1  
 
 
-# Generate predictions for the ANN model on train_data_risk
+# Generate predictions for the XG Boost model on train_data_risk
 XGB_probabilities_risk <- predict(final_xgb_model, 
-                                  new_data = train_data_risk %>% select(-age_group), 
-                                  type = "prob")$.pred_1  # Extract probability for class "1"
+                                  new_data = train_data_risk %>%
+                                  select(-age_group), 
+                                  # Extract probability for class "1"
+                                  type = "prob")$.pred_1  
 
 # Generate predictions for the Random Forest model on train_data_risk_trees
 RF_probabilities_risk <- predict(final_rf_model, 
-                                 new_data = train_data_risk_rf %>% select(-age_group), 
-                                 type = "prob")$.pred_1  # Extract probability for class "1"
+                                 new_data = train_data_risk_rf %>% 
+                                 select(-age_group), 
+                                 # Extract probability for class "1"
+                                 type = "prob")$.pred_1  
 
 # Generate predictions for the ANN model on train_data_risk
 ANN_probabilities_risk <- predict(final_nn_model, 
-                                  new_data = train_data_risk %>% select(-age_group), 
-                                  type = "prob")$.pred_1  # Extract probability for class "1"
+                                  new_data = train_data_risk %>% 
+                                  select(-age_group), 
+                                  # Extract probability for class "1"
+                                  type = "prob")$.pred_1  
 
 
 # Assign row names to train_data_risk based on a unique identifier or row numbers
