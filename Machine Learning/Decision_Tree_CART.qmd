@@ -1606,6 +1606,448 @@ networkD3::sankeyNetwork(
 
 ```
 
+# Evaluate - Nested Cross Validation
+
+## Overview
+
+This chunk executes a **5‑fold *outer* cross‑validation** on a *fixed* CART specification. We skip the inner tuning loop because:
+
+-   Nested CV roughly doubles (or worse) the computing time.
+
+-   Earlier one‑off grid searches indicated that the chosen hyper‑parameters barely shift when retuned.
+
+-   The immediate goal is to quantify **performance variability across splits**, not chase marginal parameter gains.
+
+With five 80 / 20 rotations every observation is used for testing exactly once and for training four times, giving a solid estimate of real‑world variance in AUC‑ROC, AUC‑PR, sensitivity, and specificity.
+
+**Set EVT label as a factor for the classification task and `tidymodels` function**
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(EVT = factor(EVT, levels = c(1, 0)))
+
+```
+
+**Impute Full Data**
+
+```{r}
+
+# 1. Build a recipe that covers every predictor in the data set
+imputation_recipe <- recipe(EVT ~ ., data = stroke_triage_data) %>% 
+  # all cols except EVT are predictors
+  step_impute_bag(all_predictors())
+  # bagged-tree imputation
+
+# 2. Train (prep) the recipe on the entire data set
+trained_imputation_recipe <- imputation_recipe %>% 
+  prep(training = stroke_triage_data)
+
+# 3. Bake the recipe back onto the very same data frame
+stroke_triage_data_imputed <- bake(trained_imputation_recipe,
+                                   new_data = stroke_triage_data)
+  
+```
+
+## Model Estimates (5 Fold CV)
+
+**1 Create 5 Folds**
+
+```{r, warning=FALSE}
+
+# Set seed for reproducibility and create 5 stratified outer folds
+set.seed(456)
+outer_folds <- vfold_cv(
+  data   = stroke_triage_data_imputed,
+  v      = 5,
+  strata = EVT,
+  # without this setting, strata does not work for variables with low prevalences
+  pool   = 0.05      
+)
+
+```
+
+**2 Set the Hyperprarameters of the model**
+
+Hyperparameters from section above: `select_best(cart_tune_results, metric = "roc_auc")`
+
+```{r}
+
+# Model Hyperparameters
+
+cart_spec_fixed <- decision_tree(
+  mode            = "classification",
+#  cost_complexity = 1,
+  tree_depth      = 2,
+  min_n           = 40L
+) %>%
+  set_engine("rpart")
+
+# Custom Threshold
+
+custom_threshold <- 0.4
+
+
+# Sampling Ratio
+
+custom_under_ratio <- 1.375
+
+```
+
+**3 Define a function to fit the fixed model and compute metrics per fold**
+
+In this step, the model from above (Section: Create Model, Option 2) with fixed hyperparameters is trained and evaluated across all five fold combinations.
+
+```{r}
+
+evaluate_fold_cart <- function(split,
+                          threshold   = custom_threshold,
+                          under_ratio = custom_under_ratio,
+                          seed        = 1000) {
+
+  set.seed(seed)
+
+  # Split
+  train_outer <- analysis(split) 
+  test_outer  <- assessment(split)
+
+  # Recipe 
+  fold_recipe <- recipe(
+      EVT ~ gender + age + bp_systolic + pulse + blood_glucose + temperature +
+            vigilance_4ISS + gaze_head_deviation_4ISS + hemiparesis_4ISS +
+            aphasia_dysarthria_4ISS + medication_anticoags + TOO +
+            exclusion_TOO + pupil_reaction_abnormal,
+      data = train_outer
+    ) %>%
+    step_mutate_at(all_nominal_predictors(),
+                   fn = ~ factor(.x, ordered = is.ordered(.x))) %>%
+    step_mutate(
+      vigilance_4ISS           = factor(vigilance_4ISS,
+                                        levels = 0:2,
+                                        ordered = FALSE),
+      gaze_head_deviation_4ISS = factor(gaze_head_deviation_4ISS,
+                                        levels = 0:2,
+                                        ordered = FALSE),
+      hemiparesis_4ISS         = factor(hemiparesis_4ISS,
+                                        levels = 0:2,
+                                        ordered = FALSE)
+    ) %>%
+    step_novel(all_nominal_predictors()) %>%
+    step_downsample(EVT,
+                    under_ratio = under_ratio,
+                    skip = TRUE) 
+
+  # Fit 
+  fit_outer <- workflow() %>% 
+    add_recipe(fold_recipe) %>% 
+    add_model(cart_spec_fixed) %>% 
+    fit(train_outer)
+
+  # Predict 
+  probs <- predict(fit_outer, test_outer, type = "prob")$.pred_1
+  preds_class <- factor(ifelse(probs >= threshold, "1", "0"),
+                        levels = c("1","0"))
+
+  # Metrics 
+  cm     <- caret::confusionMatrix(preds_class, test_outer$EVT, positive = "1")
+  aucroc <- pROC::auc(pROC::roc(test_outer$EVT, probs, quiet = TRUE))
+  pr_df  <- tibble(truth = test_outer$EVT, prob = probs)
+  aucpr  <- yardstick::pr_auc(pr_df, truth, prob)$.estimate
+  acc  <- as.numeric(cm$overall["Accuracy"])         
+  prec <- as.numeric(cm$byClass["Pos Pred Value"])   
+  f1    <- as.numeric(cm$byClass["F1"])   
+
+  # Dataframe for calculating PRAUC
+  pr_df <- tibble(truth = test_outer$EVT, prob = probs) %>% 
+         mutate(truth = forcats::fct_relevel(truth, "1", "0"))
+  aucpr  <- yardstick::pr_auc(pr_df, truth, prob)$.estimate
+
+  # Brier
+  truth_num <- as.numeric(as.character(test_outer$EVT))
+  brier_val <- mean((truth_num - probs)^2)
+
+  list(
+    aucroc = aucroc,
+    aucpr  = aucpr,
+    sens   = as.numeric(cm$byClass["Sensitivity"]),
+    spec   = as.numeric(cm$byClass["Specificity"]),
+    acc    = acc,
+    prec   = prec,
+    npv    = as.numeric(cm$byClass["Neg Pred Value"]),
+    f1     = f1,                                 
+    brier  = brier_val,
+    cm     = cm,
+    truth  = test_outer$EVT,
+    prob   = probs
+  )
+}
+
+```
+
+**Apply function and calculate the metrics and confusion matrices**
+
+Save the results of the metrics and the confusion matrices in `outer_results` for each fold-
+
+```{r}
+
+outer_results_cart <- outer_folds %>%
+  mutate(
+    results = map(
+      splits,
+      evaluate_fold_cart,
+      threshold = custom_threshold,
+      seed      = 1000
+    )
+  )
+```
+
+**Structure of `outer_results`**
+
+**Type:** `vfold` object (S3 class: `vfold_cv`, `rset`, `tbl_df`, `tbl`, `data.fram`
+
+**Rows:** 5 (one for each cross-validation fold)
+
+**Columns:**
+
+-   `splits`: List of 5 training/test splits (`vfold_split` objects)
+
+-   `id`: Character vector, fold identifier (e.g., `"Fold1"`, `"Fold2"`, etc.)
+
+    `results`: List of 5 elements, each containing performance metrics (aucroc, aucpr, sens, spec, cm) per fold:
+
+**4 Create metrics table**
+
+```{r}
+
+# Aggregate metrics into a summary table
+metrics_df_folds <- outer_results_cart %>% 
+  transmute(
+    Fold   = as.character(id),
+    AUCROC = map_dbl(results, "aucroc"),
+    AUCPR  = map_dbl(results, "aucpr"),
+    Sens   = map_dbl(results, "sens"),
+    Spec   = map_dbl(results, "spec")
+  )
+
+mean_row <- metrics_df_folds %>% 
+  summarise(across(where(is.numeric), mean)) %>% 
+  mutate(Fold = "Mean")
+
+metrics_table <- bind_rows(metrics_df_folds, mean_row) %>% 
+  relocate(Fold) %>% 
+  mutate(across(where(is.numeric), \(x) round(x, 2)))
+
+print(metrics_table)
+
+```
+
+**The PR-AUC is so high** because a CART stump with a single rule produces only two distinct predicted probabilities—one per leaf—which substantially inflates the PR-AUC.**\
+**
+
+**5 Print confusion matrices for each outer fold**
+
+```{r}
+
+# Print confusion matrices for each outer fold
+cm_list <- map(outer_results_cart$results, "cm")
+for (i in seq_along(cm_list)) {
+  cat(sprintf("---\nConfusion Matrix: Fold %d\n---\n", i))
+  print(cm_list[[i]])
+  cat("\n")
+}
+
+```
+
+**6 Confidence Intervals Model**
+
+**Confidence interval calculation for Nested Cross-Validation is not straightforward.**
+
+Possible approaches include: repeated nested CV (e.g., 10×5 folds) to obtain more outer estimates for bootstrapping (Data Science Stack Exchange); full data bootstrapping with nested CV per sample to capture data and model uncertainty (Cai et al., arXiv); analytical or random-effects variance modeling for CI estimation (Cai et al., Bates et al., arXiv); and simple t-based intervals over fold means, though often overly optimistic.
+
+## 4I-SS Estimates (5 Fold CV)
+
+We reuse the **existing** `outer_folds` splits from the cart evaluation to benchmark the 4‑Item Stroke Scale (4I‑SS), avoiding redundant fold creation and ensuring direct comparability across models.
+
+**1 Define a function to fit the fixed model and compute metrics per fold**
+
+```{r}
+
+# Function to compute 4I-SS metrics per outer fold
+evaluate_4iss <- function(split) {
+  # Extract test data for this fold
+  test_outer <- assessment(split)
+
+  # Compute the 4I-SS sum by converting ordered factors to numeric
+  test_outer <- test_outer %>%
+    mutate(
+      sum_4ISS = as.integer(as.character(vigilance_4ISS)) +
+                 as.integer(as.character(gaze_head_deviation_4ISS)) +
+                 as.integer(as.character(hemiparesis_4ISS)) +
+                 as.integer(as.character(aphasia_dysarthria_4ISS))
+    )
+
+  # Apply decision rule: sum_4ISS > 2 => '1'
+  preds_4iss <- test_outer %>%
+    mutate(
+      classification = factor(if_else(sum_4ISS > 2, "1", "0"), levels = levels(EVT)),
+      actual = EVT
+    )
+
+  # Compute confusion matrix
+  cm4 <- confusionMatrix(
+    data      = preds_4iss$classification,
+    reference = preds_4iss$actual,
+    positive  = "1"
+  )
+  sens4 <- as.numeric(cm4$byClass["Sensitivity"])
+  spec4 <- as.numeric(cm4$byClass["Specificity"])
+  acc4  <- as.numeric(cm4$overall["Accuracy"])
+  prec4 <- as.numeric(cm4$byClass["Pos Pred Value"])
+  npv4  <- as.numeric(cm4$byClass["Neg Pred Value"])
+  f1_4  <- as.numeric(cm4$byClass["F1"])
+
+  # Compute AUC-ROC using pROC
+  roc4_obj <- pROC::roc(
+    response  = preds_4iss$actual,
+    predictor = preds_4iss$sum_4ISS,
+    levels    = c("1", "0"),
+    direction = ">"
+  )
+  roc4_auc <- as.numeric(roc4_obj$auc)
+
+  # Compute PR AUC using yardstick
+  pr4_auc <- yardstick::pr_auc_vec(
+    truth      = preds_4iss$actual,
+    estimate   = preds_4iss$sum_4ISS
+  )
+
+  # Brier-Score 
+  truth_num <- as.numeric(as.character(preds_4iss$actual))
+  p_hat     <- if_else(preds_4iss$classification == "1", 1, 0)
+  brier4    <- mean((truth_num - p_hat)^2)
+
+  # Return metrics and confusion matrix
+  list(
+    aucroc = roc4_auc,
+    aucpr  = pr4_auc,
+    sens   = sens4,
+    spec   = spec4,
+    acc    = acc4,
+    prec   = prec4,
+    npv    = npv4,
+    f1     = f1_4,
+    brier  = brier4,
+    cm     = cm4,
+    # Raw vectors to build the outer-CV ROC curve
+    truth  = test_outer$EVT,     # factor 0/1
+    score  = test_outer$sum_4ISS # numeric predictor
+  )
+}
+
+
+```
+
+**2 Apply function and calculate the metrics and confusion matrices**
+
+```{r}
+
+# Apply 4I-SS evaluation across same outer folds
+outer_results_4iss <- outer_folds %>%
+  mutate(results = map(splits, evaluate_4iss))
+
+```
+
+**3 Create metrics table**
+
+The function `map_dbl()` iterates over the list of results, where each element corresponds to one fold. For each fold, it extracts the value associated with a specified metric name (e.g., `"aucroc"`) and returns these values as a numeric vector. Using `map_dbl()` ensures that the output is strictly numeric, making it immediately suitable for aggregation or summary statistics.
+
+```{r}
+
+# Summarize 4I-SS metrics
+metrics_4iss <- outer_results_4iss %>%
+  transmute(
+    Fold   = as.character(id),
+    AUCROC = map_dbl(results, "aucroc"),
+    AUCPR  = map_dbl(results, "aucpr"),
+    Sens   = map_dbl(results, "sens"),
+    Spec   = map_dbl(results, "spec")
+  )
+
+# Compute median row
+mean_4iss <- metrics_4iss %>% summarise(across(where(is.numeric), mean)) %>% mutate(Fold = "Mean")
+
+# Combine and round
+metrics_table_4iss <- bind_rows(metrics_4iss, mean_4iss) %>%
+  relocate(Fold) %>%
+  mutate(across(where(is.numeric), ~ round(., 2)))
+
+# Print 4I-SS results
+print(metrics_table_4iss)
+
+```
+
+**4 Print confusion matrices for each outer fold**
+
+```{r}
+
+# Print confusion matrices for 4I-SS
+cm_list_4iss <- map(outer_results_4iss$results, "cm")
+for (i in seq_along(cm_list_4iss)) {
+  cat(sprintf("---
+4I-SS Confusion Matrix: Fold %d
+---
+", i))
+  print(cm_list_4iss[[i]])
+  cat("
+")
+}
+
+```
+
+**5 Confidence Intervals 4I-SS**
+
+**Confidence interval calculation for Nested Cross-Validation is not straightforward.**
+
+Possible approaches include: repeated nested CV (e.g., 10×5 folds) to obtain more outer estimates for bootstrapping (Data Science Stack Exchange); full data bootstrapping with nested CV per sample to capture data and model uncertainty (Cai et al., arXiv); analytical or random-effects variance modeling for CI estimation (Cai et al., Bates et al., arXiv); and simple t-based intervals over fold means, though often overly optimistic.
+
+## ROC Comparison
+
+```{r}
+
+# bind predictions from all 5 outer folds
+cart_outer_preds  <- map_dfr(outer_results_cart$results,
+                           ~tibble(truth = .x$truth, score = .x$prob))
+iss_outer_preds <- map_dfr(outer_results_4iss$results,
+                           ~tibble(truth = .x$truth, score = .x$score))
+
+# square plotting region
+par(pty = "s")
+
+# Random-Forest ROC
+roc_cart <- pROC::roc(cart_outer_preds$truth, cart_outer_preds$score,
+                    levels = c("0","1"), direction = "<",
+                    percent = TRUE, plot = TRUE,
+                    col = "#6F99ADE6", lwd = 3,
+                    xlab = "1 – Specificity (%)",
+                    ylab = "Sensitivity (%)",
+                    main = "Outer-CV ROC (k = 5)")
+
+# 4I-SS ROC 
+roc_iss <- pROC::plot.roc(iss_outer_preds$truth, iss_outer_preds$score,
+                          add = TRUE,
+                          levels = c("1","0"), direction = ">",
+                          percent = TRUE, col = "#EE4C97E6", lwd = 3)
+
+# legend without AUC values
+legend("bottomright",
+       legend = c("Model", "4I-SS"),
+       col    = c("#6F99ADE6", "#EE4C97E6"),
+       lwd    = 3, bty = "n")
+
+```
+
+\newpage
+
 # Plot The Tree
 
 ```{r}
@@ -1659,12 +2101,13 @@ importance_table
 
 ```
 
-# Save the Model
-
 ```{r}
 #| include: false
 
-# Save the trained model
+# Save the final workflow
+saveRDS(cart_hyperparameter_workflow, "models/final_cart_workflow.rds")
+
+# Save the final model
 saveRDS(final_cart_fit, "models/final_cart_model.rds")
 
 ```

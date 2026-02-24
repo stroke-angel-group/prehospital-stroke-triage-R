@@ -880,6 +880,653 @@ networkD3::sankeyNetwork(
 
 ```
 
+## 4I-SS Evaluation
+
+**Load Model for Brier Scaling**
+
+Load Platt calibration model fitted on OOF predictions (from evaluation script)
+
+```{r}
+
+calib_4iss_scaled <- readRDS(here("Code",
+                                 "Machine Learning",
+                                 "models",
+                                 "calib_4iss_scaled.rds"))
+
+```
+
+We evaluated 4I-SS performance using 95% BCA confidence intervals across the full dataset and stratified by multiple time of onset windows (≤4.5h to ≤24h) to examine how early patient presentation affects model performance metrics.
+
+**Table (4I-SS Performance for EVT and Time Windows)**
+
+```{r}
+
+# Define TOO groups and prepare data
+
+# Add TOO to the 4I-SS data
+classification_4ISS$TOO <- test_data$TOO
+
+# Define TOO thresholds (in hours)
+too_thresholds <- c(4.5, 6, 9, 16, 24, Inf)
+too_labels     <- c("≤4.5h", "≤6h", "≤9h", "≤16h", "≤24h", "All")
+
+# Define min and max for 4I-SS score (theoretical range: 0-8)
+min_4iss <- 0
+max_4iss <- 8
+
+
+# Function to calculate metrics for each bootstrap
+
+calc_boot_metrics_4ISS <- function(data, indices, ...) {
+  
+  data <- data[indices, ]
+  
+  actual    <- factor(data$EVT, levels = c("0", "1"))
+  predicted <- factor(data$pred_class, levels = c("0", "1"))
+  
+  probs_raw    <- data$.pred_raw
+  probs_scaled <- data$.pred_scaled
+  truth_num    <- as.numeric(actual) - 1L
+  
+  # Apply Platt calibration for Brier score (using scaled input)
+  probs_calibrated <- predict(calib_4iss_scaled,
+                              newdata = tibble(pred = probs_scaled),
+                              type = "response")
+  
+  roc_obj <- pROC::roc(response = actual, predictor = probs_raw,
+                       levels = c("0", "1"), direction = "<", quiet = TRUE)
+  
+  pr_obj <- PRROC::pr.curve(scores.class0 = probs_raw[actual == "1"],
+                            scores.class1 = probs_raw[actual == "0"])
+  
+  c(
+    aucroc      = as.numeric(roc_obj$auc),
+    aucpr       = as.numeric(pr_obj$auc.integral),
+    accuracy    = yardstick::accuracy_vec(actual, predicted),
+    sensitivity = yardstick::sensitivity_vec(actual,
+                                             predicted,
+                                             event_level = "second"),
+    specificity = yardstick::specificity_vec(actual,
+                                             predicted,
+                                             event_level = "second"),
+    precision   = yardstick::precision_vec(actual,
+                                           predicted,
+                                           event_level = "second"),
+    npv         = yardstick::npv_vec(actual,
+                                     predicted,
+                                     event_level = "second"),
+    f1          = yardstick::f_meas_vec(actual,
+                                        predicted,
+                                        event_level = "second"),
+    
+    # Brier on Platt-calibrated probabilities
+    brier       = mean((truth_num - probs_calibrated)^2, na.rm = TRUE)
+  )
+}
+
+
+# Loop Through TOO groups and calculate metrics
+
+set.seed(456)
+
+results_list <- list()
+plot_data_list <- list()
+boot_raw_list <- list()
+
+for (i in seq_along(too_thresholds)) {
+  
+  # Filter data by TOO threshold
+  if (too_thresholds[i] == Inf) {
+    subset_idx <- rep(TRUE, nrow(classification_4ISS))
+  } else {
+    subset_idx <- classification_4ISS$TOO <= too_thresholds[i]
+  }
+  
+  # Extract raw 4I-SS scores for this subset
+  raw_scores <- as.numeric(classification_4ISS$sum_4ISS[subset_idx])
+  
+  # Apply min-max scaling to match calibration model input
+  scaled_scores <- (raw_scores - min_4iss) / (max_4iss - min_4iss)
+  
+  subset_data <- tibble(
+    pred_class   = classification_4ISS$classification_EVT[subset_idx],
+    
+    # Raw 4I-SS score (0..8) for ROC/PR
+    .pred_raw    = raw_scores,
+    
+    # Min-max scaled 4I-SS score (0..1) for calibration model input
+    .pred_scaled = scaled_scores,
+    
+    EVT          = label_4ISS[subset_idx]) %>%
+    mutate(
+      EVT        = factor(as.character(EVT), levels = c("0", "1")),
+      pred_class = factor(as.character(pred_class), levels = c("0", "1"))
+    )
+  
+  # Skip if too few observations
+  if (nrow(subset_data) < 20) next
+  
+  # Run bootstrap
+  boot_res <- boot::boot(data = subset_data, statistic = calc_boot_metrics_4ISS, R = 5000)
+  metric_names <- names(boot_res$t0)
+  
+  # Compute BCa CIs
+  metrics_bca <- map_dfr(seq_along(metric_names), function(j) {
+    ci <- tryCatch(
+      boot::boot.ci(boot_res, type = "bca", conf = 0.95, index = j),
+      error = function(e) NULL
+    )
+    tibble::tibble(
+      metric = metric_names[j],
+      value  = mean(boot_res$t[, j], na.rm = TRUE),
+      lower  = if (!is.null(ci)) ci$bca[4] else NA,
+      upper  = if (!is.null(ci)) ci$bca[5] else NA
+    )
+  })
+  
+  # Create function for formatting
+  format_function <- function(m) {
+    row <- metrics_bca[metrics_bca$metric == m, ]
+    if (is.na(row$lower)) return(sprintf("%.0f", row$value * 100))
+    sprintf("%.0f (%.0f–%.0f)", row$value * 100, row$lower * 100, row$upper * 100)
+  }
+  
+  ppv_pct_rounded <- round(metrics_bca$value[metrics_bca$metric == "precision"] * 100)
+  nna_val <- round(100 / ppv_pct_rounded, 1)
+  
+  results_list[[i]] <- tibble::tibble(
+    `Model/Metric`    = paste0("4I-SS (TOO ", too_labels[i], ")"),
+    `AUC ROC`         = format_function("aucroc"),
+    `AUPR C`          = format_function("aucpr"),
+    `Acc`             = format_function("accuracy"),
+    `Sens Recall`     = format_function("sensitivity"),
+    `Spec`            = format_function("specificity"),
+    `PPV Precision`   = format_function("precision"),
+    `NNA`             = as.character(nna_val),
+    `NPV`             = format_function("npv"),
+    `F1-score`        = format_function("f1"),
+    `Brier score (%)` = format_function("brier")
+  )
+  
+  # Data for plotting
+  plot_data_list[[i]] <- metrics_bca %>%
+    dplyr::mutate(TOO = too_thresholds[i])
+  
+  # Raw bootstrap values for the boxplots
+  boot_raw_list[[i]] <- as.data.frame(boot_res$t) %>%
+    setNames(metric_names) %>%
+    dplyr::mutate(TOO = too_thresholds[i])
+}
+
+
+# Combine Results into Final Table
+
+summary_table_4ISS_TOO <- bind_rows(results_list)
+print(summary_table_4ISS_TOO)
+
+```
+
+**Figure: (4I-SS Performance for EVT and Time Windows)**
+
+```{r}
+
+# Prepare data for plotting (exclude the "All" group)
+plot_data <- dplyr::bind_rows(plot_data_list) %>%
+  dplyr::filter(TOO != Inf) %>%
+  dplyr::mutate(
+    value = case_when(
+      metric == "aucroc" ~ value * 100,
+      metric == "aucpr"  ~ value * 100,
+      TRUE ~ value * 100
+    ),
+    lower = case_when(
+      metric == "aucroc" ~ lower * 100,
+      metric == "aucpr"  ~ lower * 100,
+      TRUE ~ lower * 100
+    ),
+    upper = case_when(
+      metric == "aucroc" ~ upper * 100,
+      metric == "aucpr"  ~ upper * 100,
+      TRUE ~ upper * 100
+    ),
+    # Set values to 0-100 range
+    lower = pmax(lower, 0),
+    upper = pmin(upper, 100),
+    value = pmax(pmin(value, 100), 0),
+    TOO = factor(TOO, levels = c(4.5, 6, 9, 16, 24)),
+    metric = factor(metric, 
+                    levels = c("aucroc", "aucpr", "accuracy", "sensitivity", 
+                               "specificity", "precision", "npv", "f1", "brier"),
+                    labels = c("AUC ROC", "AUC PR", "Accuracy", "Sensitivity", 
+                               "Specificity", "Precision", "NPV", "F1-Score", "Brier"))
+  )
+
+# Create faceted plot with whiskers for all metrics
+ggplot(plot_data, aes(x = TOO, y = value)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), 
+                width = 0.3, linewidth = 0.6, color = "grey30") +
+  geom_line(aes(group = 1), linewidth = 1, color = "grey30") +
+  geom_point(size = 1.3, shape = 21, fill = "white", stroke = 1.5, color = "grey30") +
+  facet_wrap(~ metric, ncol = 3) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20), expand = c(0, 0)) +
+  labs(
+    x = "Time of Onset (hours)",
+    y = "Performance (Median and 95% CI)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    strip.text = element_text(face = "bold", size = 12)
+  )
+
+```
+
+\newpage
+
+# Evaluate - Nested Cross Validation
+
+## Overview
+
+This chunk executes a **5‑fold *outer* cross‑validation** on a *fixed* kNN specification. We skip the inner tuning loop because:
+
+-   Nested CV roughly doubles (or worse) the computing time.
+
+-   Earlier one‑off grid searches indicated that the chosen hyper‑parameters barely shift when retuned.
+
+-   The immediate goal is to quantify **performance variability across splits**, not chase marginal parameter gains.
+
+With five 80 / 20 rotations every observation is used for testing exactly once and for training four times, giving a solid estimate of real‑world variance in AUC‑ROC, AUC‑PR, sensitivity, and specificity.
+
+**Set EVT label as a factor for the classification task and `tidymodels` function**
+
+```{r}
+
+stroke_triage_data <- stroke_triage_data %>%
+  mutate(EVT = factor(EVT, levels = c(1, 0)))
+
+```
+
+**Impute Full Data**
+
+```{r}
+
+# 1. Build a recipe that covers every predictor in the data set
+imputation_recipe <- recipe(EVT ~ ., data = stroke_triage_data) %>%   
+  # all cols except EVT are predictors
+  step_impute_bag(all_predictors())                                   
+  # bagged-tree imputation
+
+# 2. Train (prep) the recipe on the *entire* data set
+trained_imputation_recipe <- imputation_recipe %>% 
+  prep(training = stroke_triage_data)
+
+# 3. Bake the recipe back onto the very same data frame
+stroke_triage_data_imputed <- bake(trained_imputation_recipe,
+                                   new_data = stroke_triage_data)
+  
+```
+
+## Model Estimates (5 Fold CV)
+
+**1 Create 5 Folds**
+
+```{r, warning=FALSE}
+
+# Set seed for reproducibility and create 5 stratified outer folds
+set.seed(456)
+outer_folds <- vfold_cv(
+  data   = stroke_triage_data_imputed,
+  v      = 5,
+  strata = EVT,
+  # without this setting, strata does not work for variables with low prevalences
+  pool   = 0.05      
+)
+
+```
+
+**2 Set the Hyperprarameters of the model**
+
+Hyperparameters from section above: `select_best(rf_tune_results_with_cv, metric = "roc_auc")`
+
+```{r}
+
+# No Hyperparameters to set for OneR
+
+```
+
+**3 Define a function to fit the fixed model and compute metrics per fold**
+
+In this step, the model from above (Section: Create Model, Option 2) with fixed hyperparameters is trained and evaluated across all five fold combinations.
+
+```{r}
+
+evaluate_fold_oner <- function(split,
+                               seed = 100) {
+
+  set.seed(seed)
+  
+  # Split 
+  train_outer <- analysis(split)
+  test_outer  <- assessment(split)
+
+  # Recipe 
+  fold_recipe <- recipe(EVT ~ ., data = train_outer) %>%
+    step_downsample(EVT, under_ratio = 1, seed = seed, skip = TRUE)  
+
+  rec <- prep(fold_recipe, training = train_outer, retain = TRUE)
+
+  train_bal <- bake(rec, new_data = NULL)         
+  test_proc <- bake(rec, new_data = test_outer)  
+
+  # Fit 
+  one_r_model <- OneR(EVT ~ ., data = train_bal, verbose = FALSE)
+
+  # Predict
+  test_x <- test_proc %>% select(-EVT) %>% as.data.frame()
+
+  preds_vec <- predict(one_r_model, newdata = test_x)   
+  stopifnot(length(preds_vec) == nrow(test_proc))     
+
+  preds_class <- factor(preds_vec, levels = c("1", "0"))
+  probs       <- as.numeric(as.character(preds_class)) 
+
+  # Metrics 
+  cm   <- caret::confusionMatrix(preds_class, test_proc$EVT, positive = "1")
+  prdf <- tibble(truth = test_proc$EVT, prob = probs)
+
+  # Brier
+  truth_num <- as.numeric(as.character(test_proc$EVT))
+  brier_val <- mean((truth_num - probs)^2)
+
+  list(
+    aucroc = as.numeric(pROC::auc(pROC::roc(test_proc$EVT, probs, quiet = TRUE))),
+    aucpr  = yardstick::pr_auc(prdf, truth, prob)$.estimate,
+    sens   = unname(cm$byClass["Sensitivity"]),
+    spec   = unname(cm$byClass["Specificity"]),
+    acc    = unname(cm$overall["Accuracy"]),
+    prec   = unname(cm$byClass["Pos Pred Value"]),
+    npv    = unname(cm$byClass["Neg Pred Value"]),
+    f1     = unname(cm$byClass["F1"]),
+    brier  = brier_val,
+    cm     = cm,
+    truth  = test_proc$EVT,
+    prob   = probs
+  )
+}
+
+```
+
+**Apply function and calculate the metrics and confusion matrices**
+
+Save the results of the metrics and the confusion matrices in `outer_results` for each fold-
+
+```{r}
+#| warning: false
+
+# Apply evaluation across outer folds
+outer_results_oner <- outer_folds %>%
+  mutate(results = map(splits,
+                       evaluate_fold_oner,
+                       seed = 100))
+
+```
+
+**Structure of `outer_results`**
+
+**Type:** `vfold` object (S3 class: `vfold_cv`, `rset`, `tbl_df`, `tbl`, `data.fram`
+
+**Rows:** 5 (one for each cross-validation fold)
+
+**Columns:**
+
+-   `splits`: List of 5 training/test splits (`vfold_split` objects)
+
+-   `id`: Character vector, fold identifier (e.g., `"Fold1"`, `"Fold2"`, etc.)
+
+    `results`: List of 5 elements, each containing performance metrics (aucroc, aucpr, sens, spec, cm) per fold:
+
+**4 Create metrics table**
+
+```{r}
+
+# Aggregate metrics into a summary table
+metrics_df_folds <- outer_results_oner %>% 
+  transmute(
+    Fold   = id,
+    AUCROC = map_dbl(results, "aucroc"),
+    AUCPR  = map_dbl(results, "aucpr"),
+    Sens   = map_dbl(results, "sens"),
+    Spec   = map_dbl(results, "spec")
+  )
+
+mean_row <- metrics_df_folds %>% 
+  summarise(across(where(is.numeric), mean)) %>% 
+  mutate(Fold = "Mean")
+
+metrics_table <- bind_rows(metrics_df_folds, mean_row) %>% 
+  relocate(Fold) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+print(metrics_table)
+
+```
+
+**5 Print confusion matrices for each outer fold**
+
+```{r}
+
+# Print confusion matrices for each outer fold
+cm_list <- map(outer_results_oner$results, "cm")
+for (i in seq_along(cm_list)) {
+  cat(sprintf("---\nConfusion Matrix: Fold %d\n---\n", i))
+  print(cm_list[[i]])
+  cat("\n")
+}
+
+```
+
+```{r}
+
+# Print confusion matrices for each outer fold
+map2(outer_results_oner$results, seq_len(nrow(outer_folds)),
+     ~{
+       cat(sprintf("\n---\nOneR Confusion Matrix: Fold %d\n---\n", .y))
+       print(.x$cm)
+     })
+
+```
+
+**6 Confidence Intervals Model**
+
+**Confidence interval calculation for Nested Cross-Validation is not straightforward.**\
+
+Possible approaches include: repeated nested CV (e.g., 10×5 folds) to obtain more outer estimates for bootstrapping (Data Science Stack Exchange); full data bootstrapping with nested CV per sample to capture data and model uncertainty (Cai et al., arXiv); analytical or random-effects variance modeling for CI estimation (Cai et al., Bates et al., arXiv); and simple t-based intervals over fold means, though often overly optimistic.
+
+## 4I-SS Estimates (5 Fold CV)
+
+We reuse the **existing** `outer_folds` splits from the cart evaluation to benchmark the 4‑Item Stroke Scale (4I‑SS), avoiding redundant fold creation and ensuring direct comparability across models.
+
+**1 Define a function to fit the fixed model and compute metrics per fold**
+
+```{r}
+
+# Function to compute 4I-SS metrics per outer fold
+evaluate_4iss <- function(split) {
+  # Extract test data for this fold
+  test_outer <- assessment(split)
+
+  # Compute the 4I-SS sum by converting ordered factors to numeric
+  test_outer <- test_outer %>%
+    mutate(
+      sum_4ISS = as.integer(as.character(vigilance_4ISS)) +
+                 as.integer(as.character(gaze_head_deviation_4ISS)) +
+                 as.integer(as.character(hemiparesis_4ISS)) +
+                 as.integer(as.character(aphasia_dysarthria_4ISS))
+    )
+
+  # Apply decision rule: sum_4ISS > 2 => '1'
+  preds_4iss <- test_outer %>%
+    mutate(
+      classification = factor(if_else(sum_4ISS > 2, "1", "0"),
+                              levels = levels(EVT)),
+                              actual = EVT
+    )
+
+  # Compute confusion matrix
+  cm4 <- confusionMatrix(
+    data      = preds_4iss$classification,
+    reference = preds_4iss$actual,
+    positive  = "1"
+  )
+  sens4 <- as.numeric(cm4$byClass["Sensitivity"])
+  spec4 <- as.numeric(cm4$byClass["Specificity"])
+  acc4  <- as.numeric(cm4$overall["Accuracy"])
+  prec4 <- as.numeric(cm4$byClass["Pos Pred Value"])
+  npv4  <- as.numeric(cm4$byClass["Neg Pred Value"])
+  f1_4  <- as.numeric(cm4$byClass["F1"])
+
+  # Compute AUC-ROC using pROC
+  roc4_obj <- pROC::roc(
+    response  = preds_4iss$actual,
+    predictor = preds_4iss$sum_4ISS,
+    levels    = c("1", "0"),
+    direction = ">"
+  )
+  roc4_auc <- as.numeric(roc4_obj$auc)
+
+  # Compute PR AUC using yardstick
+  pr4_auc <- yardstick::pr_auc_vec(
+    truth      = preds_4iss$actual,
+    estimate   = preds_4iss$sum_4ISS
+  )
+
+  # Brier-Score 
+  truth_num <- as.numeric(as.character(preds_4iss$actual))
+  p_hat     <- if_else(preds_4iss$classification == "1", 1, 0)
+  brier4    <- mean((truth_num - p_hat)^2)
+
+  # Return metrics and confusion matrix
+  list(
+    aucroc = roc4_auc,
+    aucpr  = pr4_auc,
+    sens   = sens4,
+    spec   = spec4,
+    acc    = acc4,
+    prec   = prec4,
+    npv    = npv4,
+    f1     = f1_4,
+    brier  = brier4,
+    cm     = cm4,
+    # Raw vectors to build the outer-CV ROC curve
+    truth  = test_outer$EVT,     # factor 0/1
+    score  = test_outer$sum_4ISS # numeric predictor
+  )
+}
+
+
+```
+
+**2 Apply function and calculate the metrics and confusion matrices**
+
+```{r}
+
+# Apply 4I-SS evaluation across same outer folds
+outer_results_4iss <- outer_folds %>%
+  mutate(results = map(splits, evaluate_4iss))
+
+```
+
+**3 Create metrics table**
+
+The function `map_dbl()` iterates over the list of results, where each element corresponds to one fold. For each fold, it extracts the value associated with a specified metric name (e.g., `"aucroc"`) and returns these values as a numeric vector. Using `map_dbl()` ensures that the output is strictly numeric, making it immediately suitable for aggregation or summary statistics.
+
+```{r}
+
+# Summarize 4I-SS metrics
+metrics_4iss <- outer_results_4iss %>%
+  transmute(
+    Fold   = as.character(id),
+    AUCROC = map_dbl(results, "aucroc"),
+    AUCPR  = map_dbl(results, "aucpr"),
+    Sens   = map_dbl(results, "sens"),
+    Spec   = map_dbl(results, "spec")
+  )
+
+# Compute median row
+mean_4iss <- metrics_4iss %>% summarise(across(where(is.numeric), mean)) %>% mutate(Fold = "Mean")
+
+# Combine and round
+metrics_table_4iss <- bind_rows(metrics_4iss, mean_4iss) %>%
+  relocate(Fold) %>%
+  mutate(across(where(is.numeric), ~ round(., 2)))
+
+# Print 4I-SS results
+print(metrics_table_4iss)
+
+```
+
+**4 Print confusion matrices for each outer fold**
+
+```{r}
+
+# Print confusion matrices for 4I-SS
+cm_list_4iss <- map(outer_results_4iss$results, "cm")
+for (i in seq_along(cm_list_4iss)) {
+  cat(sprintf("---
+4I-SS Confusion Matrix: Fold %d
+---
+", i))
+  print(cm_list_4iss[[i]])
+  cat("
+")
+}
+
+```
+
+**5 Confidence Intervals 4I-SS**
+
+**Confidence interval calculation for Nested Cross-Validation is not straightforward.**\
+
+Possible approaches include: repeated nested CV (e.g., 10×5 folds) to obtain more outer estimates for bootstrapping (Data Science Stack Exchange); full data bootstrapping with nested CV per sample to capture data and model uncertainty (Cai et al., arXiv); analytical or random-effects variance modeling for CI estimation (Cai et al., Bates et al., arXiv); and simple t-based intervals over fold means, though often overly optimistic.
+
+## ROC Comparison
+
+```{r}
+
+# bind predictions from all 5 outer folds
+oner_outer_preds  <- map_dfr(outer_results_oner$results,
+                           ~tibble(truth = .x$truth, score = .x$prob))
+iss_outer_preds <- map_dfr(outer_results_4iss$results,
+                           ~tibble(truth = .x$truth, score = .x$score))
+
+# square plotting region
+par(pty = "s")
+
+# Random-Forest ROC
+roc_knn <- pROC::roc(oner_outer_preds$truth, oner_outer_preds$score,
+                    levels = c("0","1"), direction = "<",
+                    percent = TRUE, plot = TRUE,
+                    col = "#6F99ADE6", lwd = 3,
+                    xlab = "1 – Specificity (%)",
+                    ylab = "Sensitivity (%)",
+                    main = "Outer-CV ROC (k = 5)")
+
+# 4I-SS ROC 
+roc_iss <- pROC::plot.roc(iss_outer_preds$truth, iss_outer_preds$score,
+                          add = TRUE,
+                          levels = c("1","0"), direction = ">",
+                          percent = TRUE, col = "#EE4C97E6", lwd = 3)
+
+# legend without AUC values
+legend("bottomright",
+       legend = c("Model", "4I-SS"),
+       col    = c("#6F99ADE6", "#EE4C97E6"),
+       lwd    = 3, bty = "n")
+
+```
+
 # Save the Model
 
 ```{r}
