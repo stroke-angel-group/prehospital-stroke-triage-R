@@ -34,7 +34,7 @@ library(pROC)       # Sample size test data
 
 ```
 
-## **Calculation Trainings Sample Size by** `pmsampsize`
+## Calculation Trainings Sample Size by `pmsampsize`
 
 **Package recommended by Riley et al. (2025)**
 
@@ -56,7 +56,7 @@ pmsampsize::pmsampsize(
 
 ```
 
-## **Calculation Test Sample by** `pROC::power.roc.test`
+## Calculation Test Sample by `pROC::power.roc.test`
 
 **Criteria proposed by (DeLong et al., 1988)**
 

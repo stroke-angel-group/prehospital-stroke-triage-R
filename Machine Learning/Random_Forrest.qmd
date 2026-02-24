@@ -329,7 +329,7 @@ The k = 5 procedure will be repeated twice (repeats = 2) to obtain 10 estimated 
 
 **Set up the folds**
 
-```{r}
+```{r, warning=FALSE}
 
 set.seed(456)
 cv_folds <- vfold_cv(train_data,
@@ -348,11 +348,11 @@ cv_folds <- vfold_cv(train_data,
 
 EVT occurance should be sufficient for valid calculations.
 
--   Dataset: 77 (100%)
+-   Dataset: 94 (100%)
 
--   Trainingsset: 55 (80%)
+-   Trainingsset: 70 (80%)
 
--   Testset: 22 (20%)
+-   Testset: 24 (20%)
 
 ```{r}
 
