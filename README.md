@@ -76,15 +76,15 @@ This folder contains the full raw and unmatched EMS and clinical data and is not
 
 ### `Folder: Exploratory Data Analysis`
 
-This folder compares the unprocessed, preprocessed, training, and test data in a cross-table to check whether the groups differ from each other, which they ideally should not. The optimal resampling method (downsampling, upsampling, or a combination) is tuned separately for each machine learning algorithm. The script also generates pie charts showing the final EVT ratio in the resampled training data to visualise how this preprocessing step have altered the data distribution.
+This folder compares the unmatched, unprocessed, training, and test data in a cross-table to check whether the groups differ from each other, which they ideally should not. The optimal resampling method (downsampling, upsampling, or a combination) is tuned separately for each machine learning algorithm. The script also generates pie charts showing the final EVT ratio in the resampled training data to visualise how this preprocessing step have altered the data distribution.
 
 ### `Folder: Machine Learning`
 
-This folder contains the training pipeline for six machine learning models: OneR, kNN, Decision Tree, Random Forest, XGBoost, and neural networks, implemented with tidymodels. The workflow includes preprocessing steps such as bagged tree imputation of missing data and feature scaling, followed by hyperparameter optimisation using racing procedures and grid search. The tuned models are evaluated on the held-out test set and benchmarked against the 4-Item Stroke Scale (4I-SS), with performance metrics and confidence intervals derived from bootstrap resampling.
+This folder contains the training pipeline for six machine learning models: OneR, kNN, Decision Tree, Random Forest, XGBoost, and neural networks, implemented with tidymodels. The workflow includes preprocessing steps such as bagged tree imputation of missing data and feature scaling, followed by hyperparameter optimisation using racing procedures and grid search. The tuned models are evaluated on the held-out test set and benchmarked against the 4-Item Stroke Scale (4I-SS), with performance metrics and confidence intervals derived from bootstrap resampling. Nested cross-validation was additionally performed using fixed hyperparameter specifications derived from the single-seed evaluation step with hyperparameter optimisation.
 
 ### `Folder: Evaluation`
 
-We compared the top-performing models using ROC and PRC curves. Following TRIPOD-AI standards, we conducted a risk group analysis by stratifying performance by sex and age. Furthermore, we visualized the stability of performance metrics across all models by comparing bootstrap distributions and confidence intervals.
+The top-performing models were compared using ROC and PRC curves. Calibration was assessed before and after Platt scaling, and decision curve analysis was performed to evaluate net benefit across threshold probabilities. Following TRIPOD-AI standards, a risk group analysis was conducted by stratifying performance by sex and age. The stability of performance metrics across all models was visualized by comparing bootstrap distributions and confidence intervals.
 
 ### `Folder: Feature Importance`
 
